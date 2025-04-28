@@ -1,0 +1,133 @@
+# MarkMuse
+
+一个优雅而智能的 PDF 到 Markdown 转换工具，如同创作的缪斯，为您的文档赋予新生。基于 Mistral AI 的 OCR 技术。
+
+## 项目介绍
+
+MarkMuse 是一个使用 Python 开发的创新工具，可以将 PDF 文件优雅地转换为 Markdown 格式。通过利用 Mistral AI 的 OCR（光学字符识别）技术，此工具如同文档创作的Muse，灵感般地保留原始 PDF 的格式、图像和文本布局，生成高质量的 Markdown 文档。
+
+## 功能特点
+
+- 支持本地 PDF 文件和远程 URL 的 PDF 转换
+- 支持批量转换多个 PDF 文件
+- 保留原始 PDF 的文本格式和布局
+- **提取并保存 PDF 中的图片，自动在 Markdown 中正确引用**
+- 支持复杂文档的高精度识别
+- 利用先进的 OCR 技术处理图像和表格
+- 简单易用的命令行界面
+- 高效的 Markdown 格式转换
+
+## 技术原理
+
+MarkMuse 使用 Mistral AI 提供的 OCR 和文档理解技术：
+- **OCR 处理**：从 PDF 中提取文本，同时保留文档结构和层次
+- **图片提取**：保存 PDF 中的图片并在 Markdown 中正确引用
+- **格式保留**：识别并保留标题、段落、列表和表格等格式
+- **高质量输出**：直接输出结构化的 Markdown 文档
+- **错误记录**：全面的日志记录系统，便于问题排查和追踪
+
+## 安装说明
+
+### 环境要求
+- Python 3.7 或更高版本
+- pip（Python 包管理器）
+- Mistral AI API 密钥
+
+### 安装步骤
+
+1. 克隆此仓库：
+   ```
+   git clone https://github.com/yourusername/markmuse.git
+   cd markmuse
+   ```
+
+2. 安装依赖：
+   ```
+   pip install -r requirements.txt
+   ```
+
+3. 设置 Mistral AI API 密钥：
+   - 复制 `env.sample` 为 `.env` 文件
+   - 在 `.env` 文件中添加您的 Mistral API 密钥:
+   ```
+   MISTRAL_API_KEY=your_mistral_api_key_here
+   ```
+
+## 使用方法
+
+**详细使用说明请查看[使用指南](docs/usage.md)**
+
+### 常用命令示例
+
+#### 本地 PDF 文件转换
+
+```
+python markmuse.py --file input.pdf --output-dir output_folder
+```
+
+#### 远程 URL PDF 文件转换
+
+```
+python markmuse.py --url https://example.com/document.pdf --output-dir output_folder
+```
+
+#### 批量转换本地文件
+
+```
+python markmuse.py --batch --input-folder pdf文件夹/ --output-folder md文件夹/
+```
+
+#### 启用调试模式
+
+```
+python markmuse.py --file input.pdf --output-dir output_folder --debug
+```
+
+## 输出效果
+
+转换后的输出目录结构如下：
+```
+output_folder/
+├── document.md          # 转换后的 Markdown 文件
+└── document_images/     # 提取的图片目录
+    ├── img-0.jpeg       # 图片文件
+    ├── img-1.jpeg
+    └── ...
+```
+
+在 Markdown 文件中，图片引用格式为：`![图片说明](document_images/img-0.jpeg)`
+
+## 日志系统
+
+程序运行过程中会生成详细的日志信息：
+- 控制台输出：显示主要处理步骤和错误
+- 日志文件：`markmuse.log` 包含完整的处理记录，便于问题排查
+- 调试模式：使用 `--debug` 参数可以获取更详细的日志信息
+
+## 项目结构
+
+```
+markmuse/
+├── markmuse.py      # 主程序
+├── requirements.txt # 项目依赖
+├── env.sample       # 环境变量示例文件
+├── markmuse.log     # 日志文件
+├── tests/           # 测试文件
+└── docs/            # 文档
+    └── usage.md     # 详细使用指南
+```
+
+## 注意事项
+
+- 本工具需要有效的 Mistral AI API 密钥才能运行
+- 使用 API 可能会产生费用，请参考 Mistral AI 的定价
+- 处理大型 PDF 文件可能需要更长时间和更多资源
+- 转换远程 URL 的 PDF 文件需要稳定的网络连接
+- 图片较多的 PDF 文件将会生成较大的输出目录
+- 程序会自动处理大多数错误情况，详细信息请查看日志文件
+
+**更多详细使用说明和高级功能，请参阅[使用指南文档](docs/usage.md)**
+
+## 许可证
+
+MIT 
