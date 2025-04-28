@@ -5,3 +5,4 @@ argparse>=1.4.0
 langchain-openai
 langchain-community
 langchain-core
+boto3>=1.28.0

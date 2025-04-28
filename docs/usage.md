@@ -35,6 +35,16 @@ PARALLEL_IMAGES=3
 # 用于百度千帆图片分析（可选，仅在使用千帆作为图片分析提供商时需要）
 QIANFAN_AK=your_qianfan_ak_here
 QIANFAN_SK=your_qianfan_sk_here
+
+# S3/MinIO存储设置
+S3_ACCESS_KEY=your_s3_access_key
+S3_SECRET_KEY=your_s3_secret_key
+S3_ENDPOINT_URL=http://minio.example.com:9000  # MinIO服务地址，AWS S3可不设置
+S3_BUCKET=markmuse                             # 存储桶名称
+S3_REGION=us-east-1                            # 区域名称（AWS S3需要）
+S3_USE_SSL=true                                # 是否使用SSL连接
+S3_PUBLIC_URL=https://minio.example.com/markmuse  # 公共访问URL基础地址（可选）
+S3_PATH_PREFIX=pdf2md                          # 路径前缀（可选）
 ```
 
 您可以在 [Mistral AI 官网](https://mistral.ai/) 注册账号并获取 Mistral API 密钥。
@@ -431,4 +441,91 @@ python markmuse.py --file ./documents/report.pdf --output-dir ./markdown_output 
 ### 使用百度千帆作为图片分析提供商
 ```bash
 python markmuse.py --file ./documents/report.pdf --output-dir ./markdown_output --enhance-image --image-provider qianfan
-``` 
+```
+
+## S3/MinIO远程存储功能
+
+MarkMuse现在支持将转换后的Markdown文档和图片存储到S3兼容的对象存储服务中，如AWS S3或MinIO。这使您可以直接生成具有永久链接的文档，便于在网络上分享。
+
+### 配置S3/MinIO存储
+
+要使用S3/MinIO存储功能，需要在`.env`文件中配置以下环境变量：
+
+```
+# S3/MinIO存储设置
+S3_ACCESS_KEY=your_s3_access_key
+S3_SECRET_KEY=your_s3_secret_key
+S3_ENDPOINT_URL=http://minio.example.com:9000  # MinIO服务地址，AWS S3可不设置
+S3_BUCKET=markmuse                             # 存储桶名称
+S3_REGION=us-east-1                            # 区域名称（AWS S3需要）
+S3_USE_SSL=true                                # 是否使用SSL连接
+S3_PUBLIC_URL=https://minio.example.com/markmuse  # 公共访问URL基础地址（可选）
+S3_PATH_PREFIX=pdf2md                          # 路径前缀（可选）
+```
+
+### 使用S3/MinIO存储
+
+启用S3/MinIO存储非常简单，只需添加`--use-s3`参数：
+
+```bash
+python markmuse.py --file input.pdf --output-dir output_folder --use-s3
+```
+
+启用后，程序会：
+
+1. 将提取的图片上传到S3/MinIO存储
+2. 将生成的Markdown文件上传到S3/MinIO存储
+3. 使用S3/MinIO的公共URL更新文档中的图片链接，使文档在网络上可直接访问
+
+结合图片增强功能使用：
+
+```bash
+python markmuse.py --file input.pdf --output-dir output_folder --enhance-image --use-s3
+```
+
+### 输出示例
+
+使用S3/MinIO存储时，转换后的Markdown文件中的图片链接将指向S3/MinIO的URL：
+
+```markdown
+![图表标题](https://minio.example.com/markmuse/pdf2md/example_images/img-p1-1.png)
+
+**AI图片分析**：这是一张数据可视化图表，展示了某公司的季度销售数据。
+```
+
+程序会在控制台输出上传信息：
+
+```
+2023-07-02 09:45:12 - INFO - 已启用S3/MinIO远程存储，端点: http://minio.example.com:9000, 存储桶: markmuse, 路径前缀: pdf2md
+2023-07-02 09:45:30 - INFO - 开始上传图片到S3/MinIO...
+2023-07-02 09:45:45 - INFO - 共上传了 12 张图片到S3/MinIO
+2023-07-02 09:45:50 - INFO - 转换完成! Markdown文档已保存至 output_folder\example.md
+2023-07-02 09:45:52 - INFO - Markdown文档已上传到S3/MinIO: https://minio.example.com/markmuse/pdf2md/example/example.md
+```
+
+### MinIO设置指南
+
+如果您使用MinIO作为存储后端，需要先设置MinIO服务器：
+
+1. 安装并启动MinIO服务器：
+   ```bash
+   docker run -p 9000:9000 -p 9001:9001 --name minio \
+     -v /path/to/data:/data \
+     -e "MINIO_ROOT_USER=minioadmin" \
+     -e "MINIO_ROOT_PASSWORD=minioadmin" \
+     minio/minio server /data --console-address ":9001"
+   ```
+
+2. 创建一个存储桶：
+   - 访问MinIO控制台（通常是`http://localhost:9001`）
+   - 登录后创建一个名为`markmuse`的存储桶
+   - 在存储桶设置中启用公共访问
+
+3. 配置`.env`文件：
+   ```
+   S3_ACCESS_KEY=minioadmin
+   S3_SECRET_KEY=minioadmin
+   S3_ENDPOINT_URL=http://localhost:9000
+   S3_BUCKET=markmuse
+   S3_USE_SSL=false
+   ``` 
