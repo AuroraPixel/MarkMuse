@@ -12,6 +12,7 @@ MarkMuse 是一个使用 Python 开发的创新工具，可以将 PDF 文件优�
 - 支持批量转换多个 PDF 文件
 - 保留原始 PDF 的文本格式和布局
 - **提取并保存 PDF 中的图片，自动在 Markdown 中正确引用**
+- **使用多模态大模型对图片进行增强理解**
 - 支持复杂文档的高精度识别
 - 利用先进的 OCR 技术处理图像和表格
 - 简单易用的命令行界面
@@ -23,6 +24,7 @@ MarkMuse 使用 Mistral AI 提供的 OCR 和文档理解技术：
 - **OCR 处理**：从 PDF 中提取文本，同时保留文档结构和层次
 - **图片提取**：保存 PDF 中的图片并在 Markdown 中正确引用
 - **格式保留**：识别并保留标题、段落、列表和表格等格式
+- **图片分析**：使用 多模态大模型 对图片内容进行智能分析，支持流式输出
 - **高质量输出**：直接输出结构化的 Markdown 文档
 - **错误记录**：全面的日志记录系统，便于问题排查和追踪
 
@@ -48,9 +50,12 @@ MarkMuse 使用 Mistral AI 提供的 OCR 和文档理解技术：
 
 3. 设置 Mistral AI API 密钥：
    - 复制 `env.sample` 为 `.env` 文件
-   - 在 `.env` 文件中添加您的 Mistral API 密钥:
+   - 在 `.env` 文件中添加您的 API 密钥:
    ```
    MISTRAL_API_KEY=your_mistral_api_key_here
+   OPENAI_API_KEY=your_openai_api_key_here  # 用于图片分析
+   OPENAI_BASE_URL=your_base_url_here       # 可选，自定义 API 端点
+   PARALLEL_IMAGES=3                        # 可选，设置图片并行处理数量
    ```
 
 ## 使用方法

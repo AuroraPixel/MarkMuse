@@ -17,12 +17,27 @@ pip install -r requirements.txt
 ### 配置 API 密钥
 
 1. 复制 `env.sample` 文件为 `.env` 文件
-2. 在 `.env` 文件中填入您的 Mistral AI API 密钥：
+2. 在 `.env` 文件中填入您需要的 API 密钥：
+
 ```
+# 必需的 Mistral AI API 密钥
 MISTRAL_API_KEY=your_mistral_api_key_here
+
+# 用于图片分析的 OpenAI API 密钥（可选，仅在使用图片增强功能时需要）
+OPENAI_API_KEY=your_openai_api_key_here
+
+# 自定义 OpenAI API 基础 URL（可选）
+OPENAI_BASE_URL=your_base_url_here
+
+# 图片并行处理数量（可选，默认为 3）
+PARALLEL_IMAGES=3
+
+# 用于百度千帆图片分析（可选，仅在使用千帆作为图片分析提供商时需要）
+QIANFAN_AK=your_qianfan_ak_here
+QIANFAN_SK=your_qianfan_sk_here
 ```
 
-您可以在 [Mistral AI 官网](https://mistral.ai/) 注册账号并获取 API 密钥。
+您可以在 [Mistral AI 官网](https://mistral.ai/) 注册账号并获取 Mistral API 密钥。
 
 ## 基本用法
 
@@ -68,6 +83,50 @@ python markmuse.py --batch --input-folder <输入文件夹> --output-folder <输
 python markmuse.py --batch --input-folder ./pdf文件夹 --output-folder ./md文件夹
 ```
 
+### 图片增强功能
+
+MarkMuse 支持对 PDF 中的图片进行智能分析，并将分析结果添加到 Markdown 文档中。要启用此功能，使用 `--enhance-image` 参数：
+
+```bash
+python markmuse.py --file input.pdf --output-dir output_folder --enhance-image
+```
+
+默认情况下，图片分析使用 OpenAI 的 API。您也可以使用百度千帆作为分析提供商：
+
+```bash
+python markmuse.py --file input.pdf --output-dir output_folder --enhance-image --image-provider qianfan
+```
+
+#### 图片分析流式输出
+
+当启用图片增强功能时，程序会实时在控制台以流式方式展示图片分析的过程，使您能够直观地了解分析进度和内容。流式输出示例：
+
+```
+开始分析图片 img-p1-1.png ...图片是一个简洁的流程图，展示了数据处理的三个主要步骤：数据收集、数据分析和结果展示。
+图片中使用了蓝色方框表示各个处理环节，箭头指示了数据流向。
+数据收集步骤下方备注了"源自多渠道"，数据分析标注有"AI算法支持"，结果展示标明"可视化展现"。
+图中还包含了一些简单的图标：数据收集部分有一个文档图标，数据分析有一个齿轮图标，结果展示有一个图表图标。
+图片底部显示了"2023年数据处理标准流程"的文字说明。
+图片分析完成
+```
+
+#### 图片并行处理
+
+为了提高处理效率，MarkMuse 支持并行处理图片分析任务。默认情况下，程序会同时处理 3 张图片，您可以通过 `PARALLEL_IMAGES` 环境变量调整并行数量：
+
+```
+PARALLEL_IMAGES=5  # 设置为同时处理 5 张图片
+```
+
+增大并行数量可以提高处理速度，但也会增加 API 调用频率和系统资源消耗。请根据您的 API 限制和系统性能合理设置。
+
+执行时可以看到图片处理的进度条，以及并行处理的日志信息：
+
+```
+2023-07-01 10:15:23 - INFO - 图片并行处理数: 5
+处理图片: 100%|████████████████████████| 20/20 [00:30<00:00, 0.66张/s]
+```
+
 ### 调试模式
 
 如果您在使用过程中遇到问题，可以启用调试模式获取更详细的日志信息：
@@ -89,6 +148,8 @@ python markmuse.py --file input.pdf --output-dir output_folder --debug
 | `--batch` | 启用批量转换模式 |
 | `--input-folder` | 批量模式下的输入文件夹路径 |
 | `--output-folder` | 批量模式下的输出文件夹路径 |
+| `--enhance-image` | 启用图片理解增强功能 |
+| `--image-provider` | 图片理解服务提供商，可选 'openai'（默认）或 'qianfan' |
 | `--debug` | 启用调试模式，显示详细日志信息 |
 
 ## 程序运行界面与日志系统
@@ -99,10 +160,20 @@ python markmuse.py --file input.pdf --output-dir output_folder --debug
 
 ```
 2023-06-30 15:42:18 - INFO - 处理本地PDF: ./example.pdf
+2023-06-30 15:42:18 - INFO - 图片并行处理数: 3
 处理图片: 100%|████████████████████████████████████| 14/14 [00:01<00:00, 13.25张/s]
+
+开始分析图片 img-p1-1.png ...这是一张数据可视化图表，展示了某公司的季度销售数据...
+图片分析完成
+
+开始分析图片 img-p2-1.png ...图片显示的是一个组织架构图，从上至下分为三个层级...
+图片分析完成
+
 处理页面: 100%|███████████████████████████████████| 7/7 [00:00<00:00, 154.32页/s]
 2023-06-30 15:42:45 - INFO - 转换完成! Markdown文档已保存至 output_folder\example.md
 ```
+
+当启用图片增强功能时，您可以在控制台看到实时的流式图片分析过程。
 
 ### 日志文件
 
@@ -110,6 +181,10 @@ python markmuse.py --file input.pdf --output-dir output_folder --debug
 
 ```
 2023-06-30 15:42:18 - INFO - 处理本地PDF: ./example.pdf
+2023-06-30 15:42:18 - INFO - 使用自定义OpenAI API基础URL: https://your-api-endpoint.com/v1
+2023-06-30 15:42:18 - INFO - 图片并行处理数: 3
+2023-06-30 15:42:20 - INFO - 开始分析图片: img-p1-1.png
+2023-06-30 15:42:25 - INFO - 图片 img-p1-1.png 分析完成
 2023-06-30 15:42:20 - INFO - 共提取并保存了 14 张图片
 2023-06-30 15:42:45 - INFO - 转换完成! Markdown文档已保存至 output_folder\example.md
 ```
@@ -279,4 +354,81 @@ python markmuse.py --file ./documents/report.pdf --output-dir ./markdown_output 
 
 ## 返回 README
 
-查看[项目首页](../README.md)了解更多信息。 
+查看[项目首页](../README.md)了解更多信息。
+
+## 环境变量配置
+
+除了命令行参数外，MarkMuse 还支持通过环境变量进行配置：
+
+| 环境变量 | 说明 | 默认值 |
+|---------|------|-------|
+| `MISTRAL_API_KEY` | Mistral AI API 密钥 | 无，必须设置 |
+| `OPENAI_API_KEY` | OpenAI API 密钥，用于图片分析 | 无，使用图片增强时必须设置 |
+| `OPENAI_BASE_URL` | 自定义 OpenAI API 基础 URL | 无，使用官方端点 |
+| `PARALLEL_IMAGES` | 图片并行处理数量 | 3 |
+| `MODEL_NAME` | 图片分析使用的模型名称 | gpt-4o |
+| `QIANFAN_AK` | 百度千帆 API Access Key | 无，使用千帆图片分析时必须设置 |
+| `QIANFAN_SK` | 百度千帆 API Secret Key | 无，使用千帆图片分析时必须设置 |
+
+## 图片分析功能详解
+
+### 流式输出原理
+
+MarkMuse 的图片分析流式输出功能基于 LangChain 框架，能够实时展示 AI 模型的分析过程。具体工作方式如下：
+
+1. 将图片编码为 base64 格式
+2. 构造包含图片的请求消息
+3. 使用 LangChain 的流式处理接口发送请求
+4. 实时接收并显示 AI 模型的分析结果
+5. 在控制台中以打字机效果展示分析过程
+
+### 并行处理机制
+
+为了提高处理效率，MarkMuse 采用 Python 的 `concurrent.futures` 库实现图片的并行处理：
+
+1. 首先收集 PDF 中所有图片的信息
+2. 创建一个线程池，大小由 `PARALLEL_IMAGES` 环境变量控制
+3. 提交所有图片处理任务到线程池
+4. 同时处理多张图片的分析任务
+5. 使用进度条显示整体完成进度
+
+这种并行处理方式可以显著提高含有大量图片的 PDF 文档处理速度。
+
+### 分析结果集成
+
+图片分析完成后，分析结果会被集成到 Markdown 文档中：
+
+```markdown
+![图表标题](example_images/img-p1-1.png)
+
+**AI图片分析**：这是一张数据可视化图表，展示了某公司的季度销售数据。图表包含四个季度的柱状图，其中第三季度销售额最高，达到150万元。图表右侧有详细的数据标注，并用不同颜色区分了各产品线的贡献。
+```
+
+这使得生成的 Markdown 文档更加丰富和有价值，特别是对于包含复杂图表或信息图的文档。
+
+## 示例命令
+
+### 基本转换（无图片增强）
+```bash
+python markmuse.py --file ./documents/report.pdf --output-dir ./markdown_output
+```
+
+### 带图片增强的转换
+```bash
+python markmuse.py --file ./documents/report.pdf --output-dir ./markdown_output --enhance-image
+```
+
+### 使用自定义 API 端点和并行处理
+```bash
+# 设置环境变量
+export OPENAI_BASE_URL=https://your-api-endpoint.com/v1
+export PARALLEL_IMAGES=5
+
+# 执行转换
+python markmuse.py --file ./documents/report.pdf --output-dir ./markdown_output --enhance-image
+```
+
+### 使用百度千帆作为图片分析提供商
+```bash
+python markmuse.py --file ./documents/report.pdf --output-dir ./markdown_output --enhance-image --image-provider qianfan
+``` 
