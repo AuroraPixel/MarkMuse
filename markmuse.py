@@ -21,6 +21,14 @@ from dotenv import load_dotenv
 from mistralai import Mistral
 import concurrent.futures
 
+# 导入S3存储模块
+try:
+    from s3_storage import S3Storage
+    S3_SUPPORT = True
+except ImportError:
+    S3_SUPPORT = False
+    pass
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -185,17 +193,33 @@ class ImageAnalyzer:
 class MarkMuse:
     """PDF到Markdown转换器类"""
     
-    def __init__(self, enhance_images: bool = False, image_provider: str = "openai"):
+    def __init__(self, enhance_images: bool = False, image_provider: str = "openai", 
+                use_s3: bool = False, s3_config: Dict[str, str] = None):
         """
         初始化转换器
         
         参数:
         - enhance_images: 是否开启图片理解增强
         - image_provider: 图片理解服务提供商
+        - use_s3: 是否使用S3存储
+        - s3_config: S3配置参数
         """
         self.client = client
         self.enhance_images = enhance_images
         self.image_analyzer = ImageAnalyzer(image_provider) if enhance_images else None
+        
+        # S3存储相关
+        self.use_s3 = use_s3 and S3_SUPPORT
+        self.s3_storage = None
+        
+        # 初始化S3存储
+        if self.use_s3:
+            try:
+                self.s3_storage = S3Storage(s3_config)
+                logger.info("S3/MinIO存储已初始化")
+            except Exception as e:
+                logger.error(f"初始化S3存储失败: {str(e)}")
+                self.use_s3 = False
     
     def encode_pdf(self, pdf_path: str) -> Optional[str]:
         """
@@ -431,8 +455,45 @@ class MarkMuse:
         # 输出Markdown文件的路径
         output_file = os.path.join(output_dir, f"{filename}.md")
         
+        # 准备S3上传相关变量
+        s3_image_urls = {}
+        s3_prefix = filename
+        
+        # 如果启用了S3存储，上传图片到S3
+        if self.use_s3 and self.s3_storage:
+            logger.info(f"开始上传图片到S3/MinIO...")
+            
+            # 上传文件夹中的所有图片
+            s3_result = self.s3_storage.upload_directory(images_dir, f"{s3_prefix}_images")
+            
+            # 构建图片ID到S3 URL的映射
+            for local_path, s3_url in s3_result.items():
+                # 找到对应的图片ID
+                for img_id, img_info in image_map.items():
+                    path_info = img_info
+                    if isinstance(img_info, dict):
+                        path_info = img_info.get("path")
+                    
+                    if path_info == local_path:
+                        # 更新为S3 URL
+                        if isinstance(img_info, dict):
+                            s3_image_urls[img_id] = {
+                                "path": s3_url,
+                                "description": img_info.get("description", "")
+                            }
+                        else:
+                            s3_image_urls[img_id] = s3_url
+            
+            logger.info(f"共上传了 {len(s3_result)} 张图片到S3/MinIO")
+        
         # 合并所有页面的Markdown内容
         all_content = []
+        
+        # 使用S3 URL或本地路径
+        if self.use_s3 and s3_image_urls:
+            active_image_map = s3_image_urls
+        else:
+            active_image_map = image_map
         
         # 创建页面处理进度条
         with tqdm(total=len(ocr_response.pages), desc="处理页面", unit="页") as pbar:
@@ -454,24 +515,27 @@ class MarkMuse:
                                 
                             # 查找图片映射
                             img_info = None
-                            if img_id in image_map:
-                                img_info = image_map[img_id]
+                            if img_id in active_image_map:
+                                img_info = active_image_map[img_id]
                             # 尝试添加常见图片扩展名
                             elif not re.search(r'\.(jpg|jpeg|png|gif|webp)$', img_id, re.IGNORECASE):
                                 for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
-                                    if img_id + ext in image_map:
-                                        img_info = image_map[img_id + ext]
+                                    if img_id + ext in active_image_map:
+                                        img_info = active_image_map[img_id + ext]
                                         break
                             
                             if img_info and isinstance(img_info, dict) and "description" in img_info:
-                                # 计算相对路径
-                                img_path = img_info["path"]
-                                rel_path = os.path.relpath(img_path, output_dir)
-                                rel_path = rel_path.replace(os.sep, '/')
+                                # 获取图片路径或URL
+                                img_path_or_url = img_info["path"]
+                                
+                                # 如果不是使用S3，需要计算相对路径
+                                if not self.use_s3:
+                                    img_path_or_url = os.path.relpath(img_path_or_url, output_dir)
+                                    img_path_or_url = img_path_or_url.replace(os.sep, '/')
                                 
                                 # 构建新的Markdown图片引用，带上分析结果
                                 description = img_info["description"]
-                                new_img_ref = f"![{alt_text}]({rel_path})\n\n**AI图片分析**：{description}\n"
+                                new_img_ref = f"![{alt_text}]({img_path_or_url})\n\n**AI图片分析**：{description}\n"
                                 
                                 # 替换原始引用
                                 original_ref = f"![{alt_text}]({img_url})"
@@ -484,7 +548,7 @@ class MarkMuse:
         markdown_content = "\n\n".join(all_content)
         
         def replace_image_link(match):
-            """替换图片链接，使其指向本地保存的图片"""
+            """替换图片链接，使其指向本地保存的图片或S3路径"""
             alt_text = match.group(1)
             original_url = match.group(2)
             
@@ -495,32 +559,36 @@ class MarkMuse:
                 img_id = original_url
             
             # 尝试不同的方式匹配图片ID
-            local_path = None
+            path_or_url = None
             
             # 1. 直接尝试原始ID
-            if img_id in image_map:
-                img_info = image_map[img_id]
+            if img_id in active_image_map:
+                img_info = active_image_map[img_id]
                 if isinstance(img_info, dict):
-                    local_path = img_info["path"]
+                    path_or_url = img_info["path"]
                 else:
-                    local_path = img_info
+                    path_or_url = img_info
             # 2. 尝试添加常见图片扩展名
             elif not re.search(r'\.(jpg|jpeg|png|gif|webp)$', img_id, re.IGNORECASE):
                 for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
-                    if img_id + ext in image_map:
-                        img_info = image_map[img_id + ext]
+                    if img_id + ext in active_image_map:
+                        img_info = active_image_map[img_id + ext]
                         if isinstance(img_info, dict):
-                            local_path = img_info["path"]
+                            path_or_url = img_info["path"]
                         else:
-                            local_path = img_info
+                            path_or_url = img_info
                         break
             
-            if local_path:
-                # 计算从Markdown文件到图片的相对路径
-                rel_path = os.path.relpath(local_path, output_dir)
-                # 确保路径分隔符是正斜杠（Markdown兼容）
-                rel_path = rel_path.replace(os.sep, '/')
-                return f"![{alt_text}]({rel_path})"
+            if path_or_url:
+                # 如果不是使用S3，需要计算相对路径
+                if not self.use_s3:
+                    rel_path = os.path.relpath(path_or_url, output_dir)
+                    # 确保路径分隔符是正斜杠（Markdown兼容）
+                    rel_path = rel_path.replace(os.sep, '/')
+                    return f"![{alt_text}]({rel_path})"
+                else:
+                    # 对于S3，直接使用URL
+                    return f"![{alt_text}]({path_or_url})"
             else:
                 return match.group(0)  # 保留原始链接
         
@@ -533,6 +601,13 @@ class MarkMuse:
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(markdown_content)
             logger.info(f"转换完成! Markdown文档已保存至 {output_file}")
+            
+            # 如果启用了S3存储，上传Markdown文件到S3
+            if self.use_s3 and self.s3_storage:
+                s3_md_url = self.s3_storage.upload_file(output_file, f"{s3_prefix}/{filename}.md", "text/markdown")
+                if s3_md_url:
+                    logger.info(f"Markdown文档已上传到S3/MinIO: {s3_md_url}")
+            
             return output_file
         except Exception as e:
             logger.error(f"保存Markdown文件时出错: {str(e)}")
@@ -662,6 +737,10 @@ def main():
     parser.add_argument('--image-provider', choices=['openai', 'qianfan'], default='openai', 
                        help="图片理解服务提供商 (openai 或 qianfan)")
     
+    # 新增: S3/MinIO存储选项
+    if S3_SUPPORT:
+        parser.add_argument('--use-s3', action='store_true', help="启用S3/MinIO远程存储功能")
+    
     args = parser.parse_args()
     
     # 设置日志级别
@@ -669,10 +748,24 @@ def main():
         logger.setLevel(logging.DEBUG)
         logger.debug("调试模式已启用")
     
+    # 检查S3支持
+    use_s3 = False
+    if S3_SUPPORT and hasattr(args, 'use_s3') and args.use_s3:
+        use_s3 = True
+        # 检查S3环境变量是否设置
+        required_s3_vars = ['S3_ACCESS_KEY', 'S3_SECRET_KEY', 'S3_BUCKET']
+        missing_vars = [var for var in required_s3_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            logger.error(f"启用S3/MinIO存储功能失败，缺少必要的环境变量: {', '.join(missing_vars)}")
+            logger.error("请在.env文件中设置这些变量，或使用--no-s3禁用S3存储功能")
+            sys.exit(1)
+    
     # 创建转换器实例
     converter = MarkMuse(
         enhance_images=args.enhance_image,
-        image_provider=args.image_provider
+        image_provider=args.image_provider,
+        use_s3=use_s3
     )
     
     # 如果启用图片增强但未设置对应API密钥，显示警告
@@ -685,6 +778,14 @@ def main():
             logger.info(f"图片并行处理数: {PARALLEL_IMAGES}")
         elif args.image_provider == 'qianfan' and (not QIANFAN_AK or not QIANFAN_SK):
             logger.warning("启用了百度千帆图片理解但未设置QIANFAN_AK或QIANFAN_SK环境变量")
+    
+    # 如果启用了S3存储，显示信息
+    if use_s3:
+        endpoint = os.getenv('S3_ENDPOINT_URL', 'AWS S3')
+        bucket = os.getenv('S3_BUCKET')
+        prefix = os.getenv('S3_PATH_PREFIX', '')
+        logger.info(f"已启用S3/MinIO远程存储，端点: {endpoint}, 存储桶: {bucket}"
+                   + (f", 路径前缀: {prefix}" if prefix else ""))
     
     try:
         # 处理批量转换（本地文件）
