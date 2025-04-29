@@ -2,7 +2,9 @@ mistralai>=0.0.7
 tqdm==4.65.0
 python-dotenv==1.0.0
 argparse>=1.4.0
-langchain-openai
-langchain-community
-langchain-core
+langchain-openai>=0.0.1
+langchain-community>=0.0.1
+langchain-core>=0.0.1
 boto3>=1.28.0
+requests>=2.31.0
+typing-extensions>=4.7.0

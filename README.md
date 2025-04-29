@@ -126,16 +126,42 @@ output_folder/
 
 ## 项目结构
 
+项目采用模块化、分层架构设计，主要结构如下：
+
 ```
 markmuse/
-├── markmuse.py      # 主程序
-├── requirements.txt # 项目依赖
-├── env.sample       # 环境变量示例文件
-├── markmuse.log     # 日志文件
-├── tests/           # 测试文件
-└── docs/            # 文档
-    └── usage.md     # 详细使用指南
+├── clients/           # 客户端目录，存放各种第三方服务的适配器
+│   ├── ocr/           # OCR 服务客户端
+│   │   ├── abstract_client.py  # OCR 抽象接口
+│   │   └── mistral_client.py   # Mistral 实现
+│   ├── image/         # 图片分析服务客户端
+│   │   ├── abstract_analyzer.py  # 图片分析抽象接口
+│   │   ├── openai_analyzer.py    # OpenAI 实现
+│   │   └── qianfan_analyzer.py   # 百度千帆实现
+│   └── factory.py     # 客户端工厂函数
+├── config/            # 配置管理
+│   └── api_config.py  # API 配置管理
+├── markmuse.py        # 主程序
+├── s3_storage.py      # S3/MinIO 存储模块
+└── requirements.txt   # 依赖管理
 ```
+
+## 架构设计
+
+本项目采用了分层架构设计，主要分为以下几层：
+
+1. **接口层**：定义各种服务的抽象接口
+2. **实现层**：不同服务提供商的具体实现
+3. **工厂层**：负责创建和管理各种服务实例
+4. **配置层**：统一管理所有配置
+5. **应用层**：核心业务逻辑
+
+这种设计有以下优势：
+
+- **解耦**：核心业务逻辑不直接依赖具体实现
+- **可扩展**：轻松添加新的服务提供商支持
+- **可测试**：易于进行单元测试和模拟
+- **可维护**：每个模块职责清晰，方便维护
 
 ## 注意事项
 

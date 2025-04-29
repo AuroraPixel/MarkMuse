@@ -17,13 +17,17 @@ from tqdm import tqdm
 import re
 from typing import Optional, Dict, Any, Union
 import time
-from dotenv import load_dotenv
-from mistralai import Mistral
 import concurrent.futures
+
+# 导入自定义模块
+from config import load_api_config, APIConfig
+from clients.ocr import OCRClient
+from clients.image import ImageAnalyzer
+from clients.storage import S3Storage, StorageError
+from clients.factory import create_clients, create_storage_client
 
 # 导入S3存储模块
 try:
-    from s3_storage import S3Storage
     S3_SUPPORT = True
 except ImportError:
     S3_SUPPORT = False
@@ -40,173 +44,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger('markmuse')
 
-# 加载环境变量
-load_dotenv()
-
-# 获取API密钥
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-if not MISTRAL_API_KEY:
-    logger.error("未设置 MISTRAL_API_KEY 环境变量，请在 .env 文件中设置您的 Mistral API 密钥")
-    sys.exit(1)
-
-# 检查图片理解API密钥
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-QIANFAN_AK = os.getenv("QIANFAN_AK")
-QIANFAN_SK = os.getenv("QIANFAN_SK")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o")
-# 新增：并行处理图片的数量
-PARALLEL_IMAGES = int(os.getenv("PARALLEL_IMAGES", "3"))
-
-# 初始化 Mistral 客户端
-client = Mistral(api_key=MISTRAL_API_KEY)
-
-
-class ImageAnalyzer:
-    """多模态图片理解服务类"""
-    
-    def __init__(self, provider: str = "openai"):
-        """
-        初始化图片分析器
-        
-        参数:
-        - provider: 服务提供商，支持 'openai' 或 'qianfan'
-        """
-        self.provider = provider
-        self.model = None
-        
-        if provider == "openai":
-            if not OPENAI_API_KEY:
-                logger.warning("未设置OPENAI_API_KEY，无法使用OpenAI图片理解功能")
-                return
-                
-            try:
-                from langchain_openai import ChatOpenAI
-                
-                # 构建初始化参数
-                model_kwargs = {
-                    "model": MODEL_NAME,
-                    "max_tokens": None,
-                    "api_key": OPENAI_API_KEY,
-                    "temperature": 0.1,
-                    "max_retries": 3,
-                    "timeout": 30,
-                    "streaming": True,  # 启用流式输出
-                }
-                
-                # 如果设置了自定义基础URL，则添加到参数中
-                if OPENAI_BASE_URL:
-                    model_kwargs["base_url"] = OPENAI_BASE_URL
-                    logger.info(f"使用自定义OpenAI API基础URL: {OPENAI_BASE_URL}")
-                
-                self.model = ChatOpenAI(**model_kwargs)
-                logger.info("已初始化OpenAI图片理解服务")
-            except ImportError:
-                logger.error("使用OpenAI需安装langchain-openai，请执行: pip install langchain-openai")
-                
-        elif provider == "qianfan":
-            if not QIANFAN_AK or not QIANFAN_SK:
-                logger.warning("未设置QIANFAN_AK或QIANFAN_SK，无法使用百度千帆图片理解功能")
-                return
-                
-            try:
-                from langchain_community.llms import QianfanLLMEndpoint
-                os.environ["QIANFAN_AK"] = QIANFAN_AK
-                os.environ["QIANFAN_SK"] = QIANFAN_SK
-                self.model = QianfanLLMEndpoint(model=MODEL_NAME)
-                logger.info("已初始化百度千帆图片理解服务")
-            except ImportError:
-                logger.error("使用千帆需安装langchain-community，请执行: pip install langchain-community")
-        else:
-            logger.error(f"不支持的提供商: {provider}")
-    
-    def analyze_image(self, image_base64: str) -> str:
-        """分析图片内容 (非流式)"""
-        if not self.model:
-            return ""
-            
-        try:
-            if self.provider == "openai":
-                from langchain_core.messages import HumanMessage
-                
-                response = self.model.invoke([
-                    HumanMessage(content=[
-                        {"type": "text", "text": "详细描述此图片内容，关注图片中的文字、数据和关键信息，使用中文回复。"},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        }}
-                    ])
-                ])
-                return response.content
-                
-            elif self.provider == "qianfan":
-                # 百度千帆不支持直接的多模态分析，这里使用其文本能力
-                # 实际项目中可以对接百度的其他多模态API
-                return "图片分析功能暂不支持千帆接口"
-                
-            return ""
-            
-        except Exception as e:
-            logger.error(f"图片分析失败: {str(e)}")
-            return ""
-    
-    def analyze_image_streaming(self, image_base64: str, img_id: str) -> str:
-        """流式分析图片内容并实时输出结果"""
-        if not self.model:
-            return ""
-            
-        try:
-            if self.provider == "openai":
-                from langchain_core.messages import HumanMessage
-                
-                full_response = ""
-                logger.info(f"开始分析图片: {img_id}")
-                print(f"\n开始分析图片 {img_id} ...", end="", flush=True)
-                
-                for chunk in self.model.stream([
-                    HumanMessage(content=[
-                        {"type": "text", "text": "详细描述此图片内容，关注图片中的文字、数据和关键信息，使用中文回复。"},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        }}
-                    ])
-                ]):
-                    if hasattr(chunk, 'content'):
-                        content = chunk.content
-                        full_response += content
-                        print(content, end="", flush=True)
-                
-                print("\n图片分析完成\n", flush=True)
-                logger.info(f"图片 {img_id} 分析完成")
-                return full_response
-                
-            elif self.provider == "qianfan":
-                return "图片流式分析功能暂不支持千帆接口"
-                
-            return ""
-            
-        except Exception as e:
-            logger.error(f"图片流式分析失败: {str(e)}")
-            return ""
+# 加载 API 配置
+config = load_api_config()
 
 
 class MarkMuse:
     """PDF到Markdown转换器类"""
     
-    def __init__(self, enhance_images: bool = False, image_provider: str = "openai", 
-                use_s3: bool = False, s3_config: Dict[str, str] = None):
+    def __init__(
+        self, 
+        ocr_client: Optional[OCRClient] = None,
+        image_analyzer: Optional[ImageAnalyzer] = None,
+        enhance_images: bool = False, 
+        image_provider: str = "openai", 
+        use_s3: bool = False, 
+        s3_config: Dict[str, str] = None,
+        parallel_images: int = 3
+    ):
         """
         初始化转换器
         
         参数:
+        - ocr_client: OCR 客户端，如果为 None 则尝试创建默认客户端
+        - image_analyzer: 图片分析器，如果为 None 且 enhance_images 为 True 则尝试创建默认分析器
         - enhance_images: 是否开启图片理解增强
         - image_provider: 图片理解服务提供商
         - use_s3: 是否使用S3存储
         - s3_config: S3配置参数
+        - parallel_images: 并行处理图片的数量
         """
-        self.client = client
+        # 初始化 OCR 客户端
+        self.ocr_client = ocr_client
+        if not self.ocr_client:
+            clients = create_clients(config, image_provider)
+            self.ocr_client = clients["ocr_client"]
+            if not self.ocr_client:
+                logger.error("无法创建 OCR 客户端，请检查配置")
+        
+        # 初始化图片分析器
         self.enhance_images = enhance_images
-        self.image_analyzer = ImageAnalyzer(image_provider) if enhance_images else None
+        self.image_analyzer = image_analyzer
+        if not self.image_analyzer and enhance_images:
+            clients = create_clients(config, image_provider)
+            self.image_analyzer = clients["image_analyzer"]
+        
+        # 初始化并行处理数量
+        self.parallel_images = parallel_images or config.parallel_images
         
         # S3存储相关
         self.use_s3 = use_s3 and S3_SUPPORT
@@ -215,7 +98,9 @@ class MarkMuse:
         # 初始化S3存储
         if self.use_s3:
             try:
-                self.s3_storage = S3Storage(s3_config)
+                # 如果提供了特定配置，则使用它，否则使用全局配置
+                s3_config_to_use = s3_config or config
+                self.s3_storage = S3Storage(s3_config_to_use)
                 logger.info("S3/MinIO存储已初始化")
             except Exception as e:
                 logger.error(f"初始化S3存储失败: {str(e)}")
@@ -243,7 +128,7 @@ class MarkMuse:
     
     def extract_text_from_pdf(self, pdf_path_or_url: str, is_url: bool = False) -> Optional[Any]:
         """
-        使用 Mistral OCR API 从 PDF 中提取文本
+        使用 OCR 客户端从 PDF 中提取文本
         
         参数:
         - pdf_path_or_url: PDF 文件路径或URL
@@ -253,47 +138,40 @@ class MarkMuse:
         - OCR响应对象，如果失败则返回None
         """
         try:
+            if not self.ocr_client:
+                logger.error("OCR 客户端未初始化")
+                return None
+                
             if is_url:
                 logger.info(f"处理远程PDF: {pdf_path_or_url}")
                 # 直接使用URL
-                ocr_response = self.client.ocr.process(
-                    model="mistral-ocr-latest",
-                    document={
-                        "type": "document_url",
-                        "document_url": pdf_path_or_url
-                    },
-                    include_image_base64=True
-                )
+                document = {
+                    "type": "document_url",
+                    "document_url": pdf_path_or_url
+                }
             else:
                 # 本地文件，获取base64编码
                 logger.info(f"处理本地PDF: {pdf_path_or_url}")
                 base64_pdf = self.encode_pdf(pdf_path_or_url)
                 if not base64_pdf:
                     return None
-                    
-                # 调用 Mistral OCR API
-                ocr_response = self.client.ocr.process(
-                    model="mistral-ocr-latest",
-                    document={
-                        "type": "document_url",
-                        "document_url": f"data:application/pdf;base64,{base64_pdf}"
-                    },
-                    include_image_base64=True
-                )
+                
+                document = {
+                    "type": "document_url",
+                    "document_url": f"data:application/pdf;base64,{base64_pdf}"
+                }
+            
+            # 调用 OCR 客户端
+            ocr_response = self.ocr_client.process(
+                model="mistral-ocr-latest",
+                document=document,
+                include_image_base64=True
+            )
             
             return ocr_response
             
         except Exception as e:
-            # 检查是否是API相关错误
-            error_message = str(e).lower()
-            if "api key" in error_message or "authentication" in error_message:
-                logger.error(f"Mistral API 认证错误: {str(e)}")
-            elif "rate limit" in error_message or "too many requests" in error_message:
-                logger.error(f"Mistral API 速率限制: {str(e)}")
-            elif "server" in error_message or "service" in error_message:
-                logger.error(f"Mistral API 服务错误: {str(e)}")
-            else:
-                logger.error(f"处理PDF时发生错误: {str(e)}")
+            logger.error(f"处理PDF时发生错误: {str(e)}")
             return None
     
     def save_images_from_ocr(self, ocr_response: Any, images_dir: str) -> Dict[str, Union[str, Dict]]:
@@ -335,7 +213,7 @@ class MarkMuse:
                         image_tasks.append((page_idx, img_idx, img))
             
             # 使用线程池进行并行处理
-            with concurrent.futures.ThreadPoolExecutor(max_workers=PARALLEL_IMAGES) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel_images) as executor:
                 futures = {
                     executor.submit(self._process_single_image, task, images_dir): task 
                     for task in image_tasks
@@ -711,7 +589,7 @@ def main():
     """
     主函数，处理命令行参数
     """
-    parser = argparse.ArgumentParser(description="MarkMuse: 使用 Mistral AI OCR 将 PDF 文件转换为 Markdown 文档")
+    parser = argparse.ArgumentParser(description="MarkMuse: 使用 OCR 技术将 PDF 文件转换为 Markdown 文档")
     
     # 添加互斥组 - 不同的转换模式
     group = parser.add_mutually_exclusive_group(required=True)
@@ -737,6 +615,9 @@ def main():
     parser.add_argument('--image-provider', choices=['openai', 'qianfan'], default='openai', 
                        help="图片理解服务提供商 (openai 或 qianfan)")
     
+    # 并行处理选项
+    parser.add_argument('--parallel-images', type=int, help="并行处理图片的数量")
+    
     # 新增: S3/MinIO存储选项
     if S3_SUPPORT:
         parser.add_argument('--use-s3', action='store_true', help="启用S3/MinIO远程存储功能")
@@ -753,39 +634,53 @@ def main():
     if S3_SUPPORT and hasattr(args, 'use_s3') and args.use_s3:
         use_s3 = True
         # 检查S3环境变量是否设置
-        required_s3_vars = ['S3_ACCESS_KEY', 'S3_SECRET_KEY', 'S3_BUCKET']
-        missing_vars = [var for var in required_s3_vars if not os.getenv(var)]
+        required_s3_vars = ['ACCESS_KEY', 'SECRET_KEY', 'BUCKET']
+        missing_vars = [f"S3_{var}" for var in required_s3_vars if not config.__dict__.get(f"s3_{var.lower()}", None)]
         
         if missing_vars:
             logger.error(f"启用S3/MinIO存储功能失败，缺少必要的环境变量: {', '.join(missing_vars)}")
             logger.error("请在.env文件中设置这些变量，或使用--no-s3禁用S3存储功能")
             sys.exit(1)
     
-    # 创建转换器实例
-    converter = MarkMuse(
-        enhance_images=args.enhance_image,
-        image_provider=args.image_provider,
-        use_s3=use_s3
-    )
+    # 创建客户端
+    clients = create_clients(config, args.image_provider)
+    ocr_client = clients["ocr_client"]
+    image_analyzer = clients["image_analyzer"] if args.enhance_image else None
+    
+    if not ocr_client:
+        logger.error("无法创建 OCR 客户端，请检查 API 密钥配置")
+        sys.exit(1)
     
     # 如果启用图片增强但未设置对应API密钥，显示警告
     if args.enhance_image:
         if args.image_provider == 'openai':
-            if not OPENAI_API_KEY:
+            if not config.openai_api_key:
                 logger.warning("启用了OpenAI图片理解但未设置OPENAI_API_KEY环境变量")
-            elif OPENAI_BASE_URL:
-                logger.info(f"OpenAI图片理解将使用自定义API端点: {OPENAI_BASE_URL}")
-            logger.info(f"图片并行处理数: {PARALLEL_IMAGES}")
-        elif args.image_provider == 'qianfan' and (not QIANFAN_AK or not QIANFAN_SK):
+            elif config.openai_base_url:
+                logger.info(f"OpenAI图片理解将使用自定义API端点: {config.openai_base_url}")
+            parallel_images = args.parallel_images or config.parallel_images
+            logger.info(f"图片并行处理数: {parallel_images}")
+        elif args.image_provider == 'qianfan' and (not config.qianfan_ak or not config.qianfan_sk):
             logger.warning("启用了百度千帆图片理解但未设置QIANFAN_AK或QIANFAN_SK环境变量")
     
     # 如果启用了S3存储，显示信息
     if use_s3:
-        endpoint = os.getenv('S3_ENDPOINT_URL', 'AWS S3')
-        bucket = os.getenv('S3_BUCKET')
-        prefix = os.getenv('S3_PATH_PREFIX', '')
+        endpoint = config.s3_endpoint_url or 'AWS S3'
+        bucket = config.s3_bucket
+        prefix = config.s3_path_prefix
         logger.info(f"已启用S3/MinIO远程存储，端点: {endpoint}, 存储桶: {bucket}"
                    + (f", 路径前缀: {prefix}" if prefix else ""))
+        
+        # 构建 S3 配置字典，供 S3Storage 使用
+        s3_config = {
+            'access_key': config.s3_access_key,
+            'secret_key': config.s3_secret_key,
+            'bucket_name': config.s3_bucket,
+            'endpoint_url': config.s3_endpoint_url,
+            'path_prefix': config.s3_path_prefix
+        }
+    else:
+        s3_config = None
     
     try:
         # 处理批量转换（本地文件）
@@ -793,12 +688,30 @@ def main():
             if not args.input_folder or not args.output_folder:
                 parser.error("批量模式需要提供 --input-folder 和 --output-folder 参数")
             
+            converter = MarkMuse(
+                ocr_client=ocr_client,
+                image_analyzer=image_analyzer,
+                enhance_images=args.enhance_image,
+                image_provider=args.image_provider,
+                use_s3=use_s3,
+                s3_config=s3_config,
+                parallel_images=args.parallel_images
+            )
             converter.batch_convert(args.input_folder, args.output_folder)
         
         # 处理单文件转换（本地文件）
         elif args.file:
             output_dir = args.output_dir or os.path.dirname(args.file) or os.getcwd()
             
+            converter = MarkMuse(
+                ocr_client=ocr_client,
+                image_analyzer=image_analyzer,
+                enhance_images=args.enhance_image,
+                image_provider=args.image_provider,
+                use_s3=use_s3,
+                s3_config=s3_config,
+                parallel_images=args.parallel_images
+            )
             success = converter.convert_pdf_to_md(args.file, output_dir, args.output_name)
             if not success:
                 sys.exit(1)
@@ -807,6 +720,15 @@ def main():
         elif args.url:
             output_dir = args.output_dir or os.getcwd()
             
+            converter = MarkMuse(
+                ocr_client=ocr_client,
+                image_analyzer=image_analyzer,
+                enhance_images=args.enhance_image,
+                image_provider=args.image_provider,
+                use_s3=use_s3,
+                s3_config=s3_config,
+                parallel_images=args.parallel_images
+            )
             success = converter.convert_pdf_to_md(args.url, output_dir, args.output_name, is_url=True)
             if not success:
                 sys.exit(1)
