@@ -25,6 +25,7 @@ from clients.ocr import OCRClient
 from clients.llm import LLMClient
 from clients.storage import S3Storage, StorageError
 from clients.factory import create_clients, create_storage_client
+from clients.prompts import PromptManager
 
 # 导入S3存储模块
 try:
@@ -59,7 +60,8 @@ class MarkMuse:
         llm_provider: str = "openai", 
         use_s3: bool = False, 
         s3_config: Dict[str, str] = None,
-        parallel_images: int = 3
+        parallel_images: int = 3,
+        prompt_manager: Optional[PromptManager] = None
     ):
         """
         初始化转换器
@@ -72,6 +74,7 @@ class MarkMuse:
         - use_s3: 是否使用S3存储
         - s3_config: S3配置参数
         - parallel_images: 并行处理图片的数量
+        - prompt_manager: 提示词管理器，如果为 None 则创建默认管理器
         """
         # 初始化 OCR 客户端
         self.ocr_client = ocr_client
@@ -82,6 +85,9 @@ class MarkMuse:
         # 其他参数初始化
         self.enhance_images = enhance_images
         self.parallel_images = parallel_images or config.parallel_images
+        
+        # 初始化提示词管理器
+        self.prompt_manager = prompt_manager or self._create_default_prompt_manager()
         
         # 如果未提供客户端，则尝试创建
         if not self.ocr_client or (enhance_images and not self.llm_client):
@@ -129,6 +135,67 @@ class MarkMuse:
             except Exception as e:
                 logger.error(f"初始化S3存储失败: {str(e)}")
                 self.use_s3 = False
+    
+    def _create_default_prompt_manager(self) -> PromptManager:
+        """创建默认提示词管理器"""
+        # 使用当前文件所在目录作为基准，创建 prompts 目录
+        base_dir = Path(__file__).parent / "prompts"
+        os.makedirs(base_dir, exist_ok=True)
+        
+        # 为不同的模板引擎创建子目录
+        for template_type in ["jinja2", "langchain"]:
+            os.makedirs(base_dir / template_type, exist_ok=True)
+            
+        logger.debug(f"创建默认提示词管理器，基础目录: {base_dir}")
+        return PromptManager(base_dir=base_dir, default_type="jinja2")
+    
+    def _get_image_analysis_prompt(self, img_id: str, page_idx: int, page_text: str = "") -> str:
+        """
+        获取图片分析提示词
+        
+        参数:
+        - img_id: 图片ID
+        - page_idx: 页面索引
+        - page_text: 页面文本内容
+        
+        返回:
+        - 渲染后的提示词
+        """
+        try:
+            # 检测图片类型（基于图片ID或其他特征）
+            if "_chart_" in img_id or "_graph_" in img_id:
+                image_type = "chart"
+            elif "_diagram_" in img_id or "_flow_" in img_id:
+                image_type = "diagram"
+            elif "_doc_" in img_id or "_table_" in img_id or "_form_" in img_id:
+                image_type = "document"
+            else:
+                image_type = "general"
+            
+            # 准备模板参数
+            params = {
+                "image_type": image_type,
+                "page_context": page_text,
+                "page_idx": page_idx
+            }
+            
+            # 渲染模板
+            prompt = self.prompt_manager.render("image_analysis", params)
+            logger.debug(f"为图片 {img_id} 生成提示词，类型: {image_type}")
+            return prompt
+        except Exception as e:
+            logger.warning(f"使用提示词模板失败: {str(e)}，将使用默认提示词")
+            # 如果模板渲染失败，使用LLM客户端的默认提示词
+            if self.llm_client and hasattr(self.llm_client, 'get_default_prompt'):
+                return self.llm_client.get_default_prompt()
+            else:
+                # 兜底默认提示词
+                return ("请详细分析此图片内容，包括但不限于：\n"
+                        "1. 图片中的主体对象及其关系\n"
+                        "2. 文字信息（如有）\n"
+                        "3. 图表数据的解读（如适用）\n"
+                        "4. 整体语义理解\n"
+                        "输出使用简洁明了的中文描述")
     
     def encode_pdf(self, pdf_path: str) -> Optional[str]:
         """
@@ -270,6 +337,9 @@ class MarkMuse:
         else:
             logger.info(f"使用本地存储处理 {total_images} 张图片")
         
+        # 存储页面对象，以便在图片处理时获取页面文本
+        self._current_pages = ocr_response.pages
+        
         # 创建进度条
         with tqdm(total=total_images, desc="处理图片", unit="张") as pbar:
             # 收集所有图片任务
@@ -297,6 +367,9 @@ class MarkMuse:
                         if not re.search(r'\.(jpg|jpeg|png|gif|webp|bmp|tiff)$', img_id, re.IGNORECASE):
                             image_map[img_id + '.png'] = img_data
                     pbar.update(1)
+        
+        # 清理暂存的页面对象
+        self._current_pages = None
         
         # 日志明确区分结果存储位置
         s3_count = sum(1 for v in image_map.values() if isinstance(v, dict) and v.get("is_s3", False))
@@ -390,13 +463,39 @@ class MarkMuse:
             description = ""
             if self.enhance_images and self.llm_client:
                 try:
+                    # 获取页面文本内容（如果可用）
+                    page_text = ""
+                    if hasattr(self, '_current_pages') and self._current_pages and page_idx < len(self._current_pages):
+                        page = self._current_pages[page_idx]
+                        # 优先获取页面文本，如果没有则尝试从markdown中提取
+                        if hasattr(page, 'text'):
+                            page_text = page.text
+                        elif hasattr(page, 'markdown'):
+                            # 从markdown中移除图片链接和格式
+                            markdown_text = page.markdown
+                            # 移除图片链接
+                            markdown_text = re.sub(r'!\[.*?\]\(.*?\)', '', markdown_text)
+                            # 移除标题、加粗等格式
+                            markdown_text = re.sub(r'[#*_`~]', '', markdown_text)
+                            page_text = markdown_text
+                    
+                    # 获取图片分析提示词
+                    analysis_prompt = self._get_image_analysis_prompt(img_id, page_idx, page_text)
+                    
                     # 优先使用 URL 分析，如果支持
                     if img_url and hasattr(self.llm_client, 'analyze_image_url'):
-                        description = self.llm_client.analyze_image_url(img_url)
+                        description = self.llm_client.analyze_image_url(
+                            img_url, 
+                            analysis_prompt=analysis_prompt
+                        )
                         logger.debug(f"使用URL分析图片 {img_id}")
                     else:
                         # 回退到流式输出分析图片
-                        description = self.llm_client.analyze_image_streaming(cleaned_base64, img_id)
+                        description = self.llm_client.analyze_image_streaming(
+                            cleaned_base64, 
+                            img_id,
+                            analysis_prompt=analysis_prompt
+                        )
                         logger.debug(f"使用Base64分析图片 {img_id}")
                     
                     logger.debug(f"图片 {img_id} 分析结果: {description}")
@@ -714,6 +813,11 @@ def main():
     # 并行处理选项
     parser.add_argument('--parallel-images', type=int, help="并行处理图片的数量")
     
+    # 提示词模板选项
+    parser.add_argument('--templates-dir', help="提示词模板目录路径")
+    parser.add_argument('--template-type', choices=['jinja2', 'langchain'], default='jinja2',
+                        help="提示词模板类型 (jinja2 或 langchain)")
+    
     # 新增: S3/MinIO存储选项
     if S3_SUPPORT:
         parser.add_argument('--use-s3', action='store_true', help="启用S3/MinIO远程存储功能")
@@ -781,6 +885,20 @@ def main():
         logger.info(f"已启用S3/MinIO远程存储，端点: {endpoint}, 存储桶: {bucket}"
                    + (f", 路径前缀: {prefix}" if prefix else ""))
     
+    # 创建提示词管理器
+    prompt_manager = None
+    if args.templates_dir:
+        try:
+            templates_dir = Path(args.templates_dir)
+            if not templates_dir.exists():
+                logger.warning(f"指定的提示词模板目录 {args.templates_dir} 不存在，将创建")
+                os.makedirs(templates_dir, exist_ok=True)
+            
+            logger.info(f"使用提示词模板目录: {templates_dir}, 模板类型: {args.template_type}")
+            prompt_manager = PromptManager(base_dir=templates_dir, default_type=args.template_type)
+        except Exception as e:
+            logger.error(f"创建提示词管理器失败: {str(e)}，将使用默认提示词")
+    
     try:
         # 处理批量转换（本地文件）
         if args.batch:
@@ -794,7 +912,8 @@ def main():
                 llm_provider=args.llm_provider,
                 use_s3=use_s3,
                 s3_config=s3_config if isinstance(s3_config, dict) else None,
-                parallel_images=args.parallel_images
+                parallel_images=args.parallel_images,
+                prompt_manager=prompt_manager
             )
             converter.batch_convert(args.input_folder, args.output_folder)
         
@@ -809,7 +928,8 @@ def main():
                 llm_provider=args.llm_provider,
                 use_s3=use_s3,
                 s3_config=s3_config if isinstance(s3_config, dict) else None,
-                parallel_images=args.parallel_images
+                parallel_images=args.parallel_images,
+                prompt_manager=prompt_manager
             )
             success = converter.convert_pdf_to_md(args.file, output_dir, args.output_name)
             if not success:
@@ -826,7 +946,8 @@ def main():
                 llm_provider=args.llm_provider,
                 use_s3=use_s3,
                 s3_config=s3_config if isinstance(s3_config, dict) else None,
-                parallel_images=args.parallel_images
+                parallel_images=args.parallel_images,
+                prompt_manager=prompt_manager
             )
             success = converter.convert_pdf_to_md(args.url, output_dir, args.output_name, is_url=True)
             if not success:
