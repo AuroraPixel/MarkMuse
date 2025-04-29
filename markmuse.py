@@ -22,7 +22,7 @@ import concurrent.futures
 # 导入自定义模块
 from config import load_api_config, APIConfig
 from clients.ocr import OCRClient
-from clients.image import ImageAnalyzer
+from clients.llm import LLMClient
 from clients.storage import S3Storage, StorageError
 from clients.factory import create_clients, create_storage_client
 
@@ -54,9 +54,9 @@ class MarkMuse:
     def __init__(
         self, 
         ocr_client: Optional[OCRClient] = None,
-        image_analyzer: Optional[ImageAnalyzer] = None,
+        llm_client: Optional[LLMClient] = None,
         enhance_images: bool = False, 
-        image_provider: str = "openai", 
+        llm_provider: str = "openai", 
         use_s3: bool = False, 
         s3_config: Dict[str, str] = None,
         parallel_images: int = 3
@@ -66,30 +66,44 @@ class MarkMuse:
         
         参数:
         - ocr_client: OCR 客户端，如果为 None 则尝试创建默认客户端
-        - image_analyzer: 图片分析器，如果为 None 且 enhance_images 为 True 则尝试创建默认分析器
+        - llm_client: LLM 客户端，如果为 None 则尝试创建默认客户端
         - enhance_images: 是否开启图片理解增强
-        - image_provider: 图片理解服务提供商
+        - llm_provider: LLM 服务提供商 (openai 或 qianfan)
         - use_s3: 是否使用S3存储
         - s3_config: S3配置参数
         - parallel_images: 并行处理图片的数量
         """
         # 初始化 OCR 客户端
         self.ocr_client = ocr_client
-        if not self.ocr_client:
-            clients = create_clients(config, image_provider)
-            self.ocr_client = clients["ocr_client"]
-            if not self.ocr_client:
-                logger.error("无法创建 OCR 客户端，请检查配置")
         
-        # 初始化图片分析器
+        # 初始化 LLM 客户端
+        self.llm_client = llm_client
+        
+        # 其他参数初始化
         self.enhance_images = enhance_images
-        self.image_analyzer = image_analyzer
-        if not self.image_analyzer and enhance_images:
-            clients = create_clients(config, image_provider)
-            self.image_analyzer = clients["image_analyzer"]
-        
-        # 初始化并行处理数量
         self.parallel_images = parallel_images or config.parallel_images
+        
+        # 如果未提供客户端，则尝试创建
+        if not self.ocr_client or (enhance_images and not self.llm_client):
+            clients = create_clients(config, llm_provider)
+            
+            # 设置 OCR 客户端
+            if not self.ocr_client:
+                self.ocr_client = clients["ocr_client"]
+                if not self.ocr_client:
+                    logger.error("无法创建 OCR 客户端，请检查配置")
+            
+            # 设置 LLM 客户端
+            if not self.llm_client and enhance_images:
+                self.llm_client = clients["llm_client"]
+                if not self.llm_client:
+                    logger.warning("无法创建 LLM 客户端，图片增强功能将不可用")
+                    self.enhance_images = False
+                elif not self.llm_client.has_capability("image_analysis"):
+                    logger.warning(f"{llm_provider} LLM 客户端不支持图片分析功能，图片增强功能将不可用")
+                    self.enhance_images = False
+                else:
+                    logger.info(f"使用 {llm_provider} LLM 客户端作为图片分析工具")
         
         # S3存储相关
         self.use_s3 = use_s3 and S3_SUPPORT
@@ -374,15 +388,15 @@ class MarkMuse:
             
             # 分析图片内容（如果启用增强）
             description = ""
-            if self.enhance_images and self.image_analyzer:
+            if self.enhance_images and self.llm_client:
                 try:
                     # 优先使用 URL 分析，如果支持
-                    if img_url and hasattr(self.image_analyzer, 'analyze_image_url'):
-                        description = self.image_analyzer.analyze_image_url(img_url)
+                    if img_url and hasattr(self.llm_client, 'analyze_image_url'):
+                        description = self.llm_client.analyze_image_url(img_url)
                         logger.debug(f"使用URL分析图片 {img_id}")
                     else:
                         # 回退到流式输出分析图片
-                        description = self.image_analyzer.analyze_image_streaming(cleaned_base64, img_id)
+                        description = self.llm_client.analyze_image_streaming(cleaned_base64, img_id)
                         logger.debug(f"使用Base64分析图片 {img_id}")
                     
                     logger.debug(f"图片 {img_id} 分析结果: {description}")
@@ -694,8 +708,8 @@ def main():
     
     # 图片理解增强选项
     parser.add_argument('--enhance-image', action='store_true', help="启用图片理解增强功能")
-    parser.add_argument('--image-provider', choices=['openai', 'qianfan'], default='openai', 
-                       help="图片理解服务提供商 (openai 或 qianfan)")
+    parser.add_argument('--llm-provider', choices=['openai', 'qianfan'], default='openai', 
+                       help="LLM 服务提供商 (openai 或 qianfan)")
     
     # 并行处理选项
     parser.add_argument('--parallel-images', type=int, help="并行处理图片的数量")
@@ -739,9 +753,9 @@ def main():
         s3_config = None
     
     # 创建客户端
-    clients = create_clients(config, args.image_provider)
+    clients = create_clients(config, args.llm_provider)
     ocr_client = clients["ocr_client"]
-    image_analyzer = clients["image_analyzer"] if args.enhance_image else None
+    llm_client = clients["llm_client"]
     
     if not ocr_client:
         logger.error("无法创建 OCR 客户端，请检查 API 密钥配置")
@@ -749,14 +763,14 @@ def main():
     
     # 如果启用图片增强但未设置对应API密钥，显示警告
     if args.enhance_image:
-        if args.image_provider == 'openai':
+        if args.llm_provider == 'openai':
             if not config.openai_api_key:
                 logger.warning("启用了OpenAI图片理解但未设置OPENAI_API_KEY环境变量")
             elif config.openai_base_url:
                 logger.info(f"OpenAI图片理解将使用自定义API端点: {config.openai_base_url}")
             parallel_images = args.parallel_images or config.parallel_images
             logger.info(f"图片并行处理数: {parallel_images}")
-        elif args.image_provider == 'qianfan' and (not config.qianfan_ak or not config.qianfan_sk):
+        elif args.llm_provider == 'qianfan' and (not config.qianfan_ak or not config.qianfan_sk):
             logger.warning("启用了百度千帆图片理解但未设置QIANFAN_AK或QIANFAN_SK环境变量")
     
     # 如果启用了S3存储，显示信息
@@ -775,9 +789,9 @@ def main():
             
             converter = MarkMuse(
                 ocr_client=ocr_client,
-                image_analyzer=image_analyzer,
+                llm_client=llm_client,
                 enhance_images=args.enhance_image,
-                image_provider=args.image_provider,
+                llm_provider=args.llm_provider,
                 use_s3=use_s3,
                 s3_config=s3_config if isinstance(s3_config, dict) else None,
                 parallel_images=args.parallel_images
@@ -790,9 +804,9 @@ def main():
             
             converter = MarkMuse(
                 ocr_client=ocr_client,
-                image_analyzer=image_analyzer,
+                llm_client=llm_client,
                 enhance_images=args.enhance_image,
-                image_provider=args.image_provider,
+                llm_provider=args.llm_provider,
                 use_s3=use_s3,
                 s3_config=s3_config if isinstance(s3_config, dict) else None,
                 parallel_images=args.parallel_images
@@ -807,9 +821,9 @@ def main():
             
             converter = MarkMuse(
                 ocr_client=ocr_client,
-                image_analyzer=image_analyzer,
+                llm_client=llm_client,
                 enhance_images=args.enhance_image,
-                image_provider=args.image_provider,
+                llm_provider=args.llm_provider,
                 use_s3=use_s3,
                 s3_config=s3_config if isinstance(s3_config, dict) else None,
                 parallel_images=args.parallel_images
