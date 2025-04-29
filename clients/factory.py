@@ -4,12 +4,12 @@
 """
 
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 from config import APIConfig
 from clients.ocr import OCRClient, MistralOCRClient
-from clients.image import ImageAnalyzer, OpenAIImageAnalyzer, QianfanImageAnalyzer
 from clients.storage import S3Storage
+from clients.llm import LLMClient, OpenAILLMClient, QianfanLLMClient, LLMClientError
 
 logger = logging.getLogger(__name__)
 
@@ -32,45 +32,6 @@ def create_ocr_client(config: APIConfig) -> Optional[OCRClient]:
         return MistralOCRClient(api_key=config.mistral_api_key)
     except Exception as e:
         logger.error(f"创建 OCR 客户端失败: {str(e)}")
-        return None
-
-
-def create_image_analyzer(config: APIConfig, provider: str = "openai") -> Optional[ImageAnalyzer]:
-    """
-    创建图片分析器
-    
-    参数:
-    - config: API 配置
-    - provider: 提供商，支持 'openai' 和 'qianfan'
-    
-    返回:
-    - ImageAnalyzer: 图片分析器实例，如果创建失败则返回 None
-    """
-    try:
-        if provider == "openai":
-            if not config.openai_api_key:
-                logger.warning("未设置 OpenAI API 密钥，无法创建图片分析器")
-                return None
-            
-            return OpenAIImageAnalyzer(
-                api_key=config.openai_api_key,
-                model_name=config.openai_model_name,
-                base_url=config.openai_base_url
-            )
-        elif provider == "qianfan":
-            if not config.qianfan_ak or not config.qianfan_sk:
-                logger.warning("未设置百度千帆 AK/SK，无法创建图片分析器")
-                return None
-            
-            return QianfanImageAnalyzer(
-                ak=config.qianfan_ak,
-                sk=config.qianfan_sk
-            )
-        else:
-            logger.error(f"不支持的图片分析器提供商: {provider}")
-            return None
-    except Exception as e:
-        logger.error(f"创建图片分析器失败: {str(e)}")
         return None
 
 
@@ -101,26 +62,61 @@ def create_storage_client(config: APIConfig, storage_type: str = "s3") -> Option
         return None
 
 
-def create_clients(config: APIConfig, image_provider: str = "openai") -> Dict[str, any]:
+def create_llm_client(config: APIConfig, provider: str = "openai") -> Optional[LLMClient]:
     """
-    创建所有必要的客户端
+    创建 LLM 客户端
     
     参数:
     - config: API 配置
-    - image_provider: 图片分析提供商
+    - provider: 提供商，支持 'openai' 和 'qianfan'
     
     返回:
-    - Dict: 包含各种客户端的字典
+    - LLMClient: LLM 客户端实例，如果创建失败则返回 None
+    """
+    try:
+        if provider == "openai":
+            if not config.openai_api_key:
+                logger.warning("未设置 OpenAI API 密钥，无法创建 LLM 客户端")
+                return None
+            
+            return OpenAILLMClient(
+                api_key=config.openai_api_key,
+                model_name=config.openai_model_name,
+                base_url=config.openai_base_url
+            )
+        elif provider == "qianfan":
+            if not config.qianfan_ak or not config.qianfan_sk:
+                logger.warning("未设置百度千帆 AK/SK，无法创建 LLM 客户端")
+                return None
+            
+            return QianfanLLMClient(
+                ak=config.qianfan_ak,
+                sk=config.qianfan_sk
+            )
+        else:
+            logger.error(f"不支持的 LLM 客户端提供商: {provider}")
+            return None
+    except Exception as e:
+        logger.error(f"创建 LLM 客户端失败: {str(e)}")
+        return None
+
+
+def create_clients(config: APIConfig, llm_provider: str = "openai") -> Dict[str, Any]:
+    """
+    创建所有客户端
+    
+    参数:
+    - config: API 配置
+    - llm_provider: LLM 提供商，支持 'openai' 和 'qianfan'
+    
+    返回:
+    - Dict[str, Any]: 包含所有创建的客户端的字典
     """
     clients = {
         "ocr_client": create_ocr_client(config),
-        "image_analyzer": None,
+        "llm_client": create_llm_client(config, llm_provider),
         "storage_client": None
     }
-    
-    # 如果需要图片分析
-    if image_provider:
-        clients["image_analyzer"] = create_image_analyzer(config, image_provider)
     
     # 尝试创建存储客户端
     if hasattr(config, 's3_access_key') and config.s3_access_key:

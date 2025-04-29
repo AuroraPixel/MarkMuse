@@ -22,7 +22,7 @@ import concurrent.futures
 # 导入自定义模块
 from config import load_api_config, APIConfig
 from clients.ocr import OCRClient
-from clients.image import ImageAnalyzer
+from clients.llm import LLMClient
 from clients.storage import S3Storage, StorageError
 from clients.factory import create_clients, create_storage_client
 
@@ -54,9 +54,9 @@ class MarkMuse:
     def __init__(
         self, 
         ocr_client: Optional[OCRClient] = None,
-        image_analyzer: Optional[ImageAnalyzer] = None,
+        llm_client: Optional[LLMClient] = None,
         enhance_images: bool = False, 
-        image_provider: str = "openai", 
+        llm_provider: str = "openai", 
         use_s3: bool = False, 
         s3_config: Dict[str, str] = None,
         parallel_images: int = 3
@@ -66,42 +66,66 @@ class MarkMuse:
         
         参数:
         - ocr_client: OCR 客户端，如果为 None 则尝试创建默认客户端
-        - image_analyzer: 图片分析器，如果为 None 且 enhance_images 为 True 则尝试创建默认分析器
+        - llm_client: LLM 客户端，如果为 None 则尝试创建默认客户端
         - enhance_images: 是否开启图片理解增强
-        - image_provider: 图片理解服务提供商
+        - llm_provider: LLM 服务提供商 (openai 或 qianfan)
         - use_s3: 是否使用S3存储
         - s3_config: S3配置参数
         - parallel_images: 并行处理图片的数量
         """
         # 初始化 OCR 客户端
         self.ocr_client = ocr_client
-        if not self.ocr_client:
-            clients = create_clients(config, image_provider)
-            self.ocr_client = clients["ocr_client"]
-            if not self.ocr_client:
-                logger.error("无法创建 OCR 客户端，请检查配置")
         
-        # 初始化图片分析器
+        # 初始化 LLM 客户端
+        self.llm_client = llm_client
+        
+        # 其他参数初始化
         self.enhance_images = enhance_images
-        self.image_analyzer = image_analyzer
-        if not self.image_analyzer and enhance_images:
-            clients = create_clients(config, image_provider)
-            self.image_analyzer = clients["image_analyzer"]
-        
-        # 初始化并行处理数量
         self.parallel_images = parallel_images or config.parallel_images
+        
+        # 如果未提供客户端，则尝试创建
+        if not self.ocr_client or (enhance_images and not self.llm_client):
+            clients = create_clients(config, llm_provider)
+            
+            # 设置 OCR 客户端
+            if not self.ocr_client:
+                self.ocr_client = clients["ocr_client"]
+                if not self.ocr_client:
+                    logger.error("无法创建 OCR 客户端，请检查配置")
+            
+            # 设置 LLM 客户端
+            if not self.llm_client and enhance_images:
+                self.llm_client = clients["llm_client"]
+                if not self.llm_client:
+                    logger.warning("无法创建 LLM 客户端，图片增强功能将不可用")
+                    self.enhance_images = False
+                elif not self.llm_client.has_capability("image_analysis"):
+                    logger.warning(f"{llm_provider} LLM 客户端不支持图片分析功能，图片增强功能将不可用")
+                    self.enhance_images = False
+                else:
+                    logger.info(f"使用 {llm_provider} LLM 客户端作为图片分析工具")
         
         # S3存储相关
         self.use_s3 = use_s3 and S3_SUPPORT
-        self.s3_storage = None
+        self.storage_client = None
         
         # 初始化S3存储
         if self.use_s3:
             try:
                 # 如果提供了特定配置，则使用它，否则使用全局配置
                 s3_config_to_use = s3_config or config
-                self.s3_storage = S3Storage(s3_config_to_use)
-                logger.info("S3/MinIO存储已初始化")
+                # 直接创建 S3Storage 实例，而不是通过工厂方法
+                if isinstance(s3_config_to_use, dict):
+                    self.storage_client = S3Storage(s3_config_to_use)
+                else:
+                    # 使用 factory 方法创建存储客户端
+                    self.storage_client = create_storage_client(s3_config_to_use)
+                
+                if self.storage_client:
+                    logger.info("S3/MinIO存储客户端已初始化")
+                else:
+                    logger.error("创建S3存储客户端失败")
+                    self.use_s3 = False
             except Exception as e:
                 logger.error(f"初始化S3存储失败: {str(e)}")
                 self.use_s3 = False
@@ -141,7 +165,46 @@ class MarkMuse:
             if not self.ocr_client:
                 logger.error("OCR 客户端未初始化")
                 return None
+            
+            # 处理 S3 存储逻辑
+            if self.use_s3 and self.storage_client and not is_url:
+                logger.info("使用 S3 模式处理 PDF")
+                # 生成唯一存储路径
+                filename = Path(pdf_path_or_url).stem
+                import uuid
+                s3_key = f"pdfs/{filename}/{uuid.uuid4().hex[:8]}.pdf"
                 
+                # 上传并获取预签名 URL（有效期1小时）
+                pdf_url = self.storage_client.upload_file(
+                    local_file_path=pdf_path_or_url,
+                    remote_path=s3_key,
+                    content_type="application/pdf",
+                    presign_url=True,
+                    expires_in=3600
+                )
+                
+                if not pdf_url:
+                    logger.error("PDF上传到S3失败，终止处理")
+                    return None
+                
+                logger.info(f"PDF已上传至S3: {s3_key} (有效期1小时)")
+                
+                # 使用预签名URL直接处理，不再进行base64编码
+                document = {
+                    "type": "document_url",
+                    "document_url": pdf_url
+                }
+                
+                # 调用 OCR 客户端
+                ocr_response = self.ocr_client.process(
+                    model="mistral-ocr-latest",
+                    document=document,
+                    include_image_base64=True  # 仍需获取base64图像用于后处理
+                )
+                
+                return ocr_response
+                
+            # 以下是原有逻辑    
             if is_url:
                 logger.info(f"处理远程PDF: {pdf_path_or_url}")
                 # 直接使用URL
@@ -183,12 +246,12 @@ class MarkMuse:
         - images_dir: 图片保存目录
         
         返回:
-        - Dict[str, Union[str, Dict]]: 图片ID到本地保存路径的映射，或图片ID到包含路径和描述的字典映射
+        - Dict[str, Union[str, Dict]]: 图片ID到本地保存路径或S3 URL的映射
         """
-        # 确保图片目录存在
+        # 确保图片目录存在 (即使使用S3也创建本地目录，以应对S3上传失败的情况)
         os.makedirs(images_dir, exist_ok=True)
         
-        # 用于存储图片ID到本地路径的映射
+        # 用于存储图片ID到路径的映射
         image_map = {}
         
         # 计算总图片数量
@@ -200,6 +263,12 @@ class MarkMuse:
         if total_images == 0:
             logger.info("未在文档中找到图片")
             return image_map
+            
+        # 日志输出存储模式
+        if self.use_s3 and self.storage_client:
+            logger.info(f"使用S3存储处理 {total_images} 张图片 (图片直接上传到S3，不落地本地)")
+        else:
+            logger.info(f"使用本地存储处理 {total_images} 张图片")
         
         # 创建进度条
         with tqdm(total=total_images, desc="处理图片", unit="张") as pbar:
@@ -229,7 +298,15 @@ class MarkMuse:
                             image_map[img_id + '.png'] = img_data
                     pbar.update(1)
         
-        logger.info(f"共提取并保存了 {len(image_map)} 张图片")
+        # 日志明确区分结果存储位置
+        s3_count = sum(1 for v in image_map.values() if isinstance(v, dict) and v.get("is_s3", False))
+        local_count = len(image_map) - s3_count
+        
+        if s3_count > 0:
+            logger.info(f"共提取并上传到S3 {s3_count} 张图片")
+        if local_count > 0:
+            logger.info(f"共提取并保存到本地 {local_count} 张图片")
+            
         return image_map
     
     def _process_single_image(self, task_data, images_dir):
@@ -246,9 +323,6 @@ class MarkMuse:
             if not re.search(r'\.(jpg|jpeg|png|gif|webp|bmp|tiff)$', safe_filename, re.IGNORECASE):
                 safe_filename += '.png'
             
-            # 创建保存路径
-            img_path = os.path.join(images_dir, safe_filename)
-            
             # 获取base64图像数据
             image_base64_data = getattr(img, 'image_base64', None)
             
@@ -257,7 +331,10 @@ class MarkMuse:
             
             # 检查是否包含data URI前缀
             if ',' in image_base64_data and ';base64,' in image_base64_data:
+                content_type = image_base64_data.split(';')[0].split(':')[1]
                 image_base64_data = image_base64_data.split(',', 1)[1]
+            else:
+                content_type = "image/png"  # 默认内容类型
             
             try:
                 # 清理base64字符串（删除可能的换行符和空白字符）
@@ -278,26 +355,72 @@ class MarkMuse:
             # 检查解码后的数据大小，确保不为空
             if len(img_data) < 100:  # 通常任何有效图像都应该>100字节
                 return None
+                
+            img_url = None
+            img_path = None
             
-            # 保存图片
-            with open(img_path, 'wb') as f:
-                f.write(img_data)
+            # S3存储路径与URL处理
+            if self.use_s3 and self.storage_client:
+                # 构建S3存储路径
+                parent_dir = Path(images_dir).name  # 获取父目录名
+                s3_key = f"{parent_dir}/{safe_filename}"
+                
+                # 直接上传图片数据到S3
+                img_url = self.storage_client.upload_bytes(
+                    data=img_data,
+                    remote_path=s3_key,
+                    content_type=content_type
+                )
+                
+                if img_url:
+                    logger.debug(f"图片 {img_id} 已直接上传到S3，URL: {img_url}")
+                else:
+                    logger.warning(f"图片 {img_id} 上传S3失败，将尝试保存到本地")
+            
+            # 如果S3上传失败或没有启用S3，则保存到本地
+            if not img_url:
+                # 创建保存路径
+                img_path = os.path.join(images_dir, safe_filename)
+                
+                # 保存图片
+                with open(img_path, 'wb') as f:
+                    f.write(img_data)
             
             # 分析图片内容（如果启用增强）
             description = ""
-            if self.enhance_images and self.image_analyzer:
-                # 使用流式输出分析图片
-                description = self.image_analyzer.analyze_image_streaming(cleaned_base64, img_id)
-                logger.debug(f"图片 {img_id} 分析结果: {description}")
+            if self.enhance_images and self.llm_client:
+                try:
+                    # 优先使用 URL 分析，如果支持
+                    if img_url and hasattr(self.llm_client, 'analyze_image_url'):
+                        description = self.llm_client.analyze_image_url(img_url)
+                        logger.debug(f"使用URL分析图片 {img_id}")
+                    else:
+                        # 回退到流式输出分析图片
+                        description = self.llm_client.analyze_image_streaming(cleaned_base64, img_id)
+                        logger.debug(f"使用Base64分析图片 {img_id}")
+                    
+                    logger.debug(f"图片 {img_id} 分析结果: {description}")
+                except Exception as e:
+                    logger.error(f"分析图片 {img_id} 时出错: {str(e)}")
             
             # 添加到映射
             if description:
-                return img_id, {
-                    "path": img_path,
-                    "description": description
-                }
+                if img_url:  # S3模式
+                    return img_id, {
+                        "path": img_url,
+                        "description": description,
+                        "is_s3": True
+                    }
+                else:  # 本地模式
+                    return img_id, {
+                        "path": img_path,
+                        "description": description
+                    }
             else:
-                return img_id, {"path": img_path}
+                if img_url:  # S3模式
+                    return img_id, {"path": img_url, "is_s3": True}
+                else:  # 本地模式
+                    return img_id, {"path": img_path}
             
         except Exception as e:
             logger.debug(f"处理图片时出错: {str(e)}")
@@ -333,45 +456,12 @@ class MarkMuse:
         # 输出Markdown文件的路径
         output_file = os.path.join(output_dir, f"{filename}.md")
         
-        # 准备S3上传相关变量
-        s3_image_urls = {}
-        s3_prefix = filename
-        
-        # 如果启用了S3存储，上传图片到S3
-        if self.use_s3 and self.s3_storage:
-            logger.info(f"开始上传图片到S3/MinIO...")
-            
-            # 上传文件夹中的所有图片
-            s3_result = self.s3_storage.upload_directory(images_dir, f"{s3_prefix}_images")
-            
-            # 构建图片ID到S3 URL的映射
-            for local_path, s3_url in s3_result.items():
-                # 找到对应的图片ID
-                for img_id, img_info in image_map.items():
-                    path_info = img_info
-                    if isinstance(img_info, dict):
-                        path_info = img_info.get("path")
-                    
-                    if path_info == local_path:
-                        # 更新为S3 URL
-                        if isinstance(img_info, dict):
-                            s3_image_urls[img_id] = {
-                                "path": s3_url,
-                                "description": img_info.get("description", "")
-                            }
-                        else:
-                            s3_image_urls[img_id] = s3_url
-            
-            logger.info(f"共上传了 {len(s3_result)} 张图片到S3/MinIO")
-        
+        # 如果使用S3存储，则不需要上传步骤，直接使用S3 URL
+        # 由于 save_images_from_ocr 已经处理了上传，所以不需要再进行目录上传
+        # 这里只需使用图像映射中的URL
+                
         # 合并所有页面的Markdown内容
         all_content = []
-        
-        # 使用S3 URL或本地路径
-        if self.use_s3 and s3_image_urls:
-            active_image_map = s3_image_urls
-        else:
-            active_image_map = image_map
         
         # 创建页面处理进度条
         with tqdm(total=len(ocr_response.pages), desc="处理页面", unit="页") as pbar:
@@ -393,21 +483,24 @@ class MarkMuse:
                                 
                             # 查找图片映射
                             img_info = None
-                            if img_id in active_image_map:
-                                img_info = active_image_map[img_id]
+                            if img_id in image_map:
+                                img_info = image_map[img_id]
                             # 尝试添加常见图片扩展名
                             elif not re.search(r'\.(jpg|jpeg|png|gif|webp)$', img_id, re.IGNORECASE):
                                 for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
-                                    if img_id + ext in active_image_map:
-                                        img_info = active_image_map[img_id + ext]
+                                    if img_id + ext in image_map:
+                                        img_info = image_map[img_id + ext]
                                         break
                             
                             if img_info and isinstance(img_info, dict) and "description" in img_info:
                                 # 获取图片路径或URL
                                 img_path_or_url = img_info["path"]
                                 
-                                # 如果不是使用S3，需要计算相对路径
-                                if not self.use_s3:
+                                # 检查是否是S3路径（使用标记）
+                                is_s3 = img_info.get("is_s3", False)
+                                
+                                # 如果不是S3路径，需要计算相对路径
+                                if not is_s3:
                                     img_path_or_url = os.path.relpath(img_path_or_url, output_dir)
                                     img_path_or_url = img_path_or_url.replace(os.sep, '/')
                                 
@@ -438,35 +531,38 @@ class MarkMuse:
             
             # 尝试不同的方式匹配图片ID
             path_or_url = None
+            is_s3 = False
             
             # 1. 直接尝试原始ID
-            if img_id in active_image_map:
-                img_info = active_image_map[img_id]
+            if img_id in image_map:
+                img_info = image_map[img_id]
                 if isinstance(img_info, dict):
                     path_or_url = img_info["path"]
+                    is_s3 = img_info.get("is_s3", False)
                 else:
                     path_or_url = img_info
             # 2. 尝试添加常见图片扩展名
             elif not re.search(r'\.(jpg|jpeg|png|gif|webp)$', img_id, re.IGNORECASE):
                 for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
-                    if img_id + ext in active_image_map:
-                        img_info = active_image_map[img_id + ext]
+                    if img_id + ext in image_map:
+                        img_info = image_map[img_id + ext]
                         if isinstance(img_info, dict):
                             path_or_url = img_info["path"]
+                            is_s3 = img_info.get("is_s3", False)
                         else:
                             path_or_url = img_info
                         break
             
             if path_or_url:
-                # 如果不是使用S3，需要计算相对路径
-                if not self.use_s3:
+                # 如果是S3路径，直接使用URL
+                if is_s3:
+                    return f"![{alt_text}]({path_or_url})"
+                # 否则需要计算相对路径
+                else:
                     rel_path = os.path.relpath(path_or_url, output_dir)
                     # 确保路径分隔符是正斜杠（Markdown兼容）
                     rel_path = rel_path.replace(os.sep, '/')
                     return f"![{alt_text}]({rel_path})"
-                else:
-                    # 对于S3，直接使用URL
-                    return f"![{alt_text}]({path_or_url})"
             else:
                 return match.group(0)  # 保留原始链接
         
@@ -481,8 +577,8 @@ class MarkMuse:
             logger.info(f"转换完成! Markdown文档已保存至 {output_file}")
             
             # 如果启用了S3存储，上传Markdown文件到S3
-            if self.use_s3 and self.s3_storage:
-                s3_md_url = self.s3_storage.upload_file(output_file, f"{s3_prefix}/{filename}.md", "text/markdown")
+            if self.use_s3 and self.storage_client:
+                s3_md_url = self.storage_client.upload_file(output_file, f"{filename}/{filename}.md", "text/markdown")
                 if s3_md_url:
                     logger.info(f"Markdown文档已上传到S3/MinIO: {s3_md_url}")
             
@@ -612,8 +708,8 @@ def main():
     
     # 图片理解增强选项
     parser.add_argument('--enhance-image', action='store_true', help="启用图片理解增强功能")
-    parser.add_argument('--image-provider', choices=['openai', 'qianfan'], default='openai', 
-                       help="图片理解服务提供商 (openai 或 qianfan)")
+    parser.add_argument('--llm-provider', choices=['openai', 'qianfan'], default='openai', 
+                       help="LLM 服务提供商 (openai 或 qianfan)")
     
     # 并行处理选项
     parser.add_argument('--parallel-images', type=int, help="并行处理图片的数量")
@@ -635,43 +731,17 @@ def main():
         use_s3 = True
         # 检查S3环境变量是否设置
         required_s3_vars = ['ACCESS_KEY', 'SECRET_KEY', 'BUCKET']
-        missing_vars = [f"S3_{var}" for var in required_s3_vars if not config.__dict__.get(f"s3_{var.lower()}", None)]
+        missing_vars = [f"S3_{var}" for var in required_s3_vars 
+                       if not getattr(config, f"s3_{var.lower()}", None)]
         
         if missing_vars:
             logger.error(f"启用S3/MinIO存储功能失败，缺少必要的环境变量: {', '.join(missing_vars)}")
             logger.error("请在.env文件中设置这些变量，或使用--no-s3禁用S3存储功能")
             sys.exit(1)
-    
-    # 创建客户端
-    clients = create_clients(config, args.image_provider)
-    ocr_client = clients["ocr_client"]
-    image_analyzer = clients["image_analyzer"] if args.enhance_image else None
-    
-    if not ocr_client:
-        logger.error("无法创建 OCR 客户端，请检查 API 密钥配置")
-        sys.exit(1)
-    
-    # 如果启用图片增强但未设置对应API密钥，显示警告
-    if args.enhance_image:
-        if args.image_provider == 'openai':
-            if not config.openai_api_key:
-                logger.warning("启用了OpenAI图片理解但未设置OPENAI_API_KEY环境变量")
-            elif config.openai_base_url:
-                logger.info(f"OpenAI图片理解将使用自定义API端点: {config.openai_base_url}")
-            parallel_images = args.parallel_images or config.parallel_images
-            logger.info(f"图片并行处理数: {parallel_images}")
-        elif args.image_provider == 'qianfan' and (not config.qianfan_ak or not config.qianfan_sk):
-            logger.warning("启用了百度千帆图片理解但未设置QIANFAN_AK或QIANFAN_SK环境变量")
-    
-    # 如果启用了S3存储，显示信息
-    if use_s3:
-        endpoint = config.s3_endpoint_url or 'AWS S3'
-        bucket = config.s3_bucket
-        prefix = config.s3_path_prefix
-        logger.info(f"已启用S3/MinIO远程存储，端点: {endpoint}, 存储桶: {bucket}"
-                   + (f", 路径前缀: {prefix}" if prefix else ""))
-        
-        # 构建 S3 配置字典，供 S3Storage 使用
+        else:
+            logger.info("S3/MinIO 环境变量配置已验证")
+            
+        # 构建 S3 配置字典，供存储客户端使用
         s3_config = {
             'access_key': config.s3_access_key,
             'secret_key': config.s3_secret_key,
@@ -682,6 +752,35 @@ def main():
     else:
         s3_config = None
     
+    # 创建客户端
+    clients = create_clients(config, args.llm_provider)
+    ocr_client = clients["ocr_client"]
+    llm_client = clients["llm_client"]
+    
+    if not ocr_client:
+        logger.error("无法创建 OCR 客户端，请检查 API 密钥配置")
+        sys.exit(1)
+    
+    # 如果启用图片增强但未设置对应API密钥，显示警告
+    if args.enhance_image:
+        if args.llm_provider == 'openai':
+            if not config.openai_api_key:
+                logger.warning("启用了OpenAI图片理解但未设置OPENAI_API_KEY环境变量")
+            elif config.openai_base_url:
+                logger.info(f"OpenAI图片理解将使用自定义API端点: {config.openai_base_url}")
+            parallel_images = args.parallel_images or config.parallel_images
+            logger.info(f"图片并行处理数: {parallel_images}")
+        elif args.llm_provider == 'qianfan' and (not config.qianfan_ak or not config.qianfan_sk):
+            logger.warning("启用了百度千帆图片理解但未设置QIANFAN_AK或QIANFAN_SK环境变量")
+    
+    # 如果启用了S3存储，显示信息
+    if use_s3:
+        endpoint = config.s3_endpoint_url or 'AWS S3'
+        bucket = config.s3_bucket
+        prefix = config.s3_path_prefix
+        logger.info(f"已启用S3/MinIO远程存储，端点: {endpoint}, 存储桶: {bucket}"
+                   + (f", 路径前缀: {prefix}" if prefix else ""))
+    
     try:
         # 处理批量转换（本地文件）
         if args.batch:
@@ -690,11 +789,11 @@ def main():
             
             converter = MarkMuse(
                 ocr_client=ocr_client,
-                image_analyzer=image_analyzer,
+                llm_client=llm_client,
                 enhance_images=args.enhance_image,
-                image_provider=args.image_provider,
+                llm_provider=args.llm_provider,
                 use_s3=use_s3,
-                s3_config=s3_config,
+                s3_config=s3_config if isinstance(s3_config, dict) else None,
                 parallel_images=args.parallel_images
             )
             converter.batch_convert(args.input_folder, args.output_folder)
@@ -705,11 +804,11 @@ def main():
             
             converter = MarkMuse(
                 ocr_client=ocr_client,
-                image_analyzer=image_analyzer,
+                llm_client=llm_client,
                 enhance_images=args.enhance_image,
-                image_provider=args.image_provider,
+                llm_provider=args.llm_provider,
                 use_s3=use_s3,
-                s3_config=s3_config,
+                s3_config=s3_config if isinstance(s3_config, dict) else None,
                 parallel_images=args.parallel_images
             )
             success = converter.convert_pdf_to_md(args.file, output_dir, args.output_name)
@@ -722,11 +821,11 @@ def main():
             
             converter = MarkMuse(
                 ocr_client=ocr_client,
-                image_analyzer=image_analyzer,
+                llm_client=llm_client,
                 enhance_images=args.enhance_image,
-                image_provider=args.image_provider,
+                llm_provider=args.llm_provider,
                 use_s3=use_s3,
-                s3_config=s3_config,
+                s3_config=s3_config if isinstance(s3_config, dict) else None,
                 parallel_images=args.parallel_images
             )
             success = converter.convert_pdf_to_md(args.url, output_dir, args.output_name, is_url=True)

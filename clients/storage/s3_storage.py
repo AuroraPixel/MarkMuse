@@ -177,7 +177,7 @@ class S3Storage(Storage):
                 logger.error(f"检查存储桶 {bucket_name} 时出错: {str(e)}")
                 raise StorageError(f"检查存储桶 {bucket_name} 时出错: {str(e)}")
     
-    def upload_file(self, local_file_path: str, remote_path: str = None, content_type: str = None) -> Optional[str]:
+    def upload_file(self, local_file_path: str, remote_path: str = None, content_type: str = None, presign_url: bool = False, expires_in: int = 3600) -> Optional[str]:
         """
         上传文件到 S3 存储
         
@@ -185,9 +185,11 @@ class S3Storage(Storage):
         - local_file_path: 本地文件路径
         - remote_path: S3 中的对象键(路径)，如果为 None，则使用文件名
         - content_type: 文件内容类型
+        - presign_url: 是否返回预签名URL而不是公开URL
+        - expires_in: 预签名URL的有效期（秒），默认1小时
         
         返回:
-        - 文件的公共URL，如果上传失败返回None
+        - 文件的公共URL或预签名URL，如果上传失败返回None
         
         抛出:
         - StorageError: 上传失败
@@ -222,9 +224,10 @@ class S3Storage(Storage):
                 if ext:
                     content_type = self._get_content_type(ext)
                     extra_args['ContentType'] = content_type
-                
-            # 额外参数：使文件公开可访问
-            extra_args['ACL'] = 'public-read'
+            
+            # 如果不需要预签名URL，则设为公开读取     
+            if not presign_url:
+                extra_args['ACL'] = 'public-read'
             
             # 上传文件
             logger.debug(f"正在上传文件 {local_file_path} 到 {bucket_name}/{remote_path}")
@@ -237,9 +240,18 @@ class S3Storage(Storage):
             
             logger.info(f"文件 {local_file_path} 上传到 S3 成功，对象键: {remote_path}")
             
-            # 生成公共 URL
-            public_url = self.get_public_url(remote_path)
-            return public_url
+            # 生成URL
+            if presign_url:
+                # 创建预签名URL
+                presigned_url = self.s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': bucket_name, 'Key': remote_path},
+                    ExpiresIn=expires_in
+                )
+                return presigned_url
+            else:
+                # 返回普通公共URL
+                return self.get_public_url(remote_path)
             
         except Exception as e:
             logger.error(f"上传文件 {local_file_path} 到 S3 失败: {str(e)}")
@@ -380,4 +392,101 @@ class S3Storage(Storage):
             '.css': 'text/css'
         }
         
-        return content_types.get(ext.lower(), 'application/octet-stream') 
+        return content_types.get(ext.lower(), 'application/octet-stream')
+
+    def upload_fileobj(self, file_obj, remote_path: str, content_type: str = None, presign_url: bool = False, expires_in: int = 3600) -> Optional[str]:
+        """
+        上传文件对象(内存流)到 S3 存储
+        
+        参数:
+        - file_obj: 文件对象，如 BytesIO 实例
+        - remote_path: S3 中的对象键(路径)
+        - content_type: 文件内容类型
+        - presign_url: 是否返回预签名URL而不是公开URL
+        - expires_in: 预签名URL的有效期（秒），默认1小时
+        
+        返回:
+        - 文件的公共URL或预签名URL，如果上传失败返回None
+        
+        抛出:
+        - StorageError: 上传失败
+        """
+        bucket_name = self.config['bucket_name']
+        
+        try:
+            # 检查桶是否存在
+            if not self.check_bucket_exists():
+                return None
+                
+            # 处理路径前缀
+            path_prefix = self.config.get('path_prefix', '').strip('/')
+            if path_prefix and not remote_path.startswith(f"{path_prefix}/"):
+                remote_path = f"{path_prefix}/{remote_path}"
+            
+            # 使用 boto3 的 upload_fileobj 方法
+            extra_args = {}
+            
+            # 如果提供了内容类型，则添加到参数
+            if content_type:
+                extra_args['ContentType'] = content_type
+            
+            # 如果不需要预签名URL，则设为公开读取
+            if not presign_url:
+                extra_args['ACL'] = 'public-read'
+            
+            # 上传文件对象
+            logger.debug(f"正在上传文件对象到 {bucket_name}/{remote_path}")
+            self.s3_client.upload_fileobj(
+                Fileobj=file_obj,
+                Bucket=bucket_name,
+                Key=remote_path,
+                ExtraArgs=extra_args
+            )
+            
+            logger.info(f"文件对象上传到 S3 成功，对象键: {remote_path}")
+            
+            # 生成URL
+            if presign_url:
+                # 创建预签名URL
+                presigned_url = self.s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': bucket_name, 'Key': remote_path},
+                    ExpiresIn=expires_in
+                )
+                return presigned_url
+            else:
+                # 返回普通公共URL
+                return self.get_public_url(remote_path)
+            
+        except Exception as e:
+            logger.error(f"上传文件对象到 S3 失败: {str(e)}")
+            import traceback
+            logger.debug(f"错误详情: {traceback.format_exc()}")
+            if isinstance(e, StorageError):
+                raise
+            raise StorageError(f"上传文件对象到 S3 失败: {str(e)}")
+
+    def upload_bytes(self, data: bytes, remote_path: str, content_type: str = None, presign_url: bool = False, expires_in: int = 3600) -> Optional[str]:
+        """
+        上传字节数据到 S3 存储
+        
+        参数:
+        - data: 字节数据
+        - remote_path: S3 中的对象键(路径)
+        - content_type: 文件内容类型
+        - presign_url: 是否返回预签名URL而不是公开URL
+        - expires_in: 预签名URL的有效期（秒），默认1小时
+        
+        返回:
+        - 文件的公共URL或预签名URL，如果上传失败返回None
+        
+        抛出:
+        - StorageError: 上传失败
+        """
+        from io import BytesIO
+        
+        # 创建 BytesIO 对象
+        file_obj = BytesIO(data)
+        
+        # 调用 upload_fileobj 方法
+        return self.upload_fileobj(file_obj, remote_path, content_type, presign_url, expires_in) 

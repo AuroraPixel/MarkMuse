@@ -1,8 +1,10 @@
 """
-客户端模块包
-提供各种第三方服务的统一接口和实现
+客户端模块
+包含各种第三方服务的客户端实现
 """
 
-from .factory import create_clients, create_ocr_client, create_image_analyzer
+from . import ocr
+from . import storage
+from . import llm
 
-__all__ = ['create_clients', 'create_ocr_client', 'create_image_analyzer'] 
+__all__ = ['ocr', 'storage', 'llm'] 

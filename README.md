@@ -100,20 +100,9 @@ python markmuse.py --file input.pdf --output-dir output_folder --use-s3
 #### 组合使用多种功能
 
 ```
-python markmuse.py --file input.pdf --output-dir output_folder --enhance-image --use-s3
+python markmuse.py --file input.pdf --enhance-image --use-s3
 ```
 
-## 输出效果
-
-转换后的输出目录结构如下：
-```
-output_folder/
-├── document.md          # 转换后的 Markdown 文件
-└── document_images/     # 提取的图片目录
-    ├── img-0.jpeg       # 图片文件
-    ├── img-1.jpeg
-    └── ...
-```
 
 在 Markdown 文件中，图片引用格式为：`![图片说明](document_images/img-0.jpeg)`
 
@@ -142,7 +131,6 @@ markmuse/
 ├── config/            # 配置管理
 │   └── api_config.py  # API 配置管理
 ├── markmuse.py        # 主程序
-├── s3_storage.py      # S3/MinIO 存储模块
 └── requirements.txt   # 依赖管理
 ```
 
