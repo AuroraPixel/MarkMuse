@@ -110,4 +110,49 @@ class OpenAIImageAnalyzer(ImageAnalyzer):
             return full_response
         except Exception as e:
             logger.error(f"图片流式分析失败: {str(e)}")
-            raise ImageAnalyzerError(f"图片流式分析失败: {str(e)}") 
+            raise ImageAnalyzerError(f"图片流式分析失败: {str(e)}")
+    
+    def analyze_image_url(self, image_url: str, analysis_prompt: Optional[str] = None) -> str:
+        """通过远程 URL 分析图片内容"""
+        if not self.model:
+            logger.error("OpenAI 模型未初始化")
+            return ""
+            
+        try:
+            from langchain_core.messages import HumanMessage
+            
+            # 使用传入的提示词或默认提示词
+            prompt = analysis_prompt or self.get_default_prompt()
+            
+            logger.info(f"开始分析远程图片: {image_url}")
+            print(f"\n开始分析图片 (URL模式) ...", end="", flush=True)
+            
+            # 流式处理
+            full_response = ""
+            for chunk in self.model.stream([
+                HumanMessage(content=[
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                ])
+            ]):
+                if hasattr(chunk, 'content'):
+                    content = chunk.content
+                    full_response += content
+                    print(content, end="", flush=True)
+            
+            print("\n图片分析完成\n", flush=True)
+            logger.info(f"远程图片 URL 分析完成")
+            return full_response
+            
+        except Exception as e:
+            logger.error(f"远程图片分析失败: {str(e)}")
+            raise ImageAnalyzerError(f"远程图片分析失败: {str(e)}")
+            
+    def get_default_prompt(self) -> str:
+        """重写默认提示词"""
+        return ("请详细分析此图片内容，包括但不限于：\n"
+                "1. 图片中的主体对象及其关系\n"
+                "2. 文字信息（如有）\n"
+                "3. 数据可视化图表的解读（如适用）\n"
+                "4. 整体语义理解\n"
+                "输出使用简洁明了的中文描述") 
