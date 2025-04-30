@@ -165,3 +165,6 @@ markmuse/
 ## 许可证
 
 MIT 
+
+## 欢迎加了群聊
+![img-0.jpeg](docs/wc.png)
