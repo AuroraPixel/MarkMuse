@@ -167,4 +167,4 @@ markmuse/
 MIT 
 
 ## 欢迎加了群聊
-![img-0.jpeg](docs/wc.png)
+![img-0.jpeg](docs/wc.jpg)
