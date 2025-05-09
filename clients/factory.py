@@ -10,6 +10,8 @@ from config import APIConfig
 from clients.ocr import OCRClient, MistralOCRClient
 from clients.storage import S3Storage
 from clients.llm import LLMClient, OpenAILLMClient, QianfanLLMClient, LLMClientError
+from clients.redis import RedisClient, RedisError
+from clients.celery.app import celery_app, configure_celery
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,47 @@ def create_llm_client(config: APIConfig, provider: str = "openai") -> Optional[L
         return None
 
 
+def create_redis_client(config: APIConfig) -> Optional[RedisClient]:
+    """
+    创建 Redis 客户端
+    
+    参数:
+    - config: API 配置
+    
+    返回:
+    - RedisClient: Redis 客户端实例，如果创建失败则返回 None
+    """
+    try:
+        return RedisClient(config=config)
+    except RedisError as e:
+        logger.error(f"创建 Redis 客户端失败: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"创建 Redis 客户端时出现未知错误: {str(e)}")
+        return None
+
+
+def create_celery_app(config: APIConfig, **kwargs) -> Any:
+    """
+    配置并返回 Celery 应用实例
+    
+    参数:
+    - config: API 配置
+    - kwargs: 其他 Celery 配置参数
+    
+    返回:
+    - Any: Celery 应用实例
+    """
+    try:
+        return configure_celery(celery_app, config, **kwargs)
+    except Exception as e:
+        logger.error(f"配置 Celery 应用失败: {str(e)}")
+        # 返回一个最小配置的Celery应用
+        celery_app.conf.broker_url = 'redis://localhost:6379/0'
+        celery_app.conf.result_backend = 'redis://localhost:6379/0'
+        return celery_app
+
+
 def create_clients(config: APIConfig, llm_provider: str = "openai") -> Dict[str, Any]:
     """
     创建所有客户端
@@ -115,11 +158,25 @@ def create_clients(config: APIConfig, llm_provider: str = "openai") -> Dict[str,
     clients = {
         "ocr_client": create_ocr_client(config),
         "llm_client": create_llm_client(config, llm_provider),
-        "storage_client": None
+        "storage_client": None,
+        "redis_client": None,
+        "celery_app": celery_app
     }
     
     # 尝试创建存储客户端
     if hasattr(config, 's3_access_key') and config.s3_access_key:
         clients["storage_client"] = create_storage_client(config)
+    
+    # 尝试创建Redis客户端
+    try:
+        clients["redis_client"] = create_redis_client(config)
+    except Exception as e:
+        logger.warning(f"创建Redis客户端失败: {str(e)}")
+    
+    # 配置Celery应用
+    try:
+        configure_celery(celery_app, config)
+    except Exception as e:
+        logger.warning(f"配置Celery应用失败: {str(e)}")
     
     return clients 

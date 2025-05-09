@@ -47,6 +47,26 @@ class APIConfig:
     db_port: Optional[str] = None
     db_name: Optional[str] = None
     database_url: Optional[str] = None
+    
+    # Redis 配置
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: Optional[str] = None
+    redis_ssl: bool = False
+    redis_url: Optional[str] = None
+    
+    # Celery 配置
+    celery_broker_url: Optional[str] = None
+    celery_result_backend: Optional[str] = None
+    celery_task_serializer: str = "json"
+    celery_result_serializer: str = "json"
+    celery_accept_content: str = "json"
+    celery_timezone: str = "Asia/Shanghai"
+    celery_enable_utc: bool = True
+    celery_task_track_started: bool = True
+    celery_task_time_limit: int = 3600
+    celery_worker_concurrency: int = 4
 
 
 def load_api_config() -> APIConfig:
@@ -89,7 +109,27 @@ def load_api_config() -> APIConfig:
         db_host=os.getenv("DB_HOST", "localhost"),
         db_port=os.getenv("DB_PORT", "5432"),
         db_name=os.getenv("DB_NAME"),
-        database_url=os.getenv("DATABASE_URL")
+        database_url=os.getenv("DATABASE_URL"),
+        
+        # Redis 配置
+        redis_host=os.getenv("REDIS_HOST", "localhost"),
+        redis_port=int(os.getenv("REDIS_PORT", "6379")),
+        redis_db=int(os.getenv("REDIS_DB", "0")),
+        redis_password=os.getenv("REDIS_PASSWORD", ""),
+        redis_ssl=os.getenv("REDIS_SSL", "").lower() == "true",
+        redis_url=os.getenv("REDIS_URL"),
+        
+        # Celery 配置
+        celery_broker_url=os.getenv("CELERY_BROKER_URL"),
+        celery_result_backend=os.getenv("CELERY_RESULT_BACKEND"),
+        celery_task_serializer=os.getenv("CELERY_TASK_SERIALIZER", "json"),
+        celery_result_serializer=os.getenv("CELERY_RESULT_SERIALIZER", "json"),
+        celery_accept_content=os.getenv("CELERY_ACCEPT_CONTENT", "json"),
+        celery_timezone=os.getenv("CELERY_TIMEZONE", "Asia/Shanghai"),
+        celery_enable_utc=os.getenv("CELERY_ENABLE_UTC", "").lower() == "true",
+        celery_task_track_started=os.getenv("CELERY_TASK_TRACK_STARTED", "").lower() == "true",
+        celery_task_time_limit=int(os.getenv("CELERY_TASK_TIME_LIMIT", "3600")),
+        celery_worker_concurrency=int(os.getenv("CELERY_WORKER_CONCURRENCY", "4"))
     )
     
     # 验证必要的配置
@@ -112,6 +152,18 @@ else:
     else:
         DATABASE_URL = None
         logger.warning("数据库连接未完全配置，数据库功能将不可用。请配置 DATABASE_URL 或所有单独的数据库参数")
+
+# Redis配置
+# 如果直接提供了REDIS_URL，则使用它；否则从单独的配置构建
+if api_config.redis_url:
+    REDIS_URL = api_config.redis_url
+else:
+    # 构建Redis URL
+    password_part = f":{api_config.redis_password}@" if api_config.redis_password else ""
+    protocol = "rediss" if api_config.redis_ssl else "redis"
+    REDIS_URL = f"{protocol}://{password_part}{api_config.redis_host}:{api_config.redis_port}/{api_config.redis_db}"
+    # 更新配置中的URL
+    api_config.redis_url = REDIS_URL
 
 # 创建 SQLAlchemy 引擎和会话（如果DATABASE_URL可用）
 if DATABASE_URL:

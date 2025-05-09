@@ -6,5 +6,7 @@
 from . import ocr
 from . import storage
 from . import llm
+from . import redis
+from . import celery
 
-__all__ = ['ocr', 'storage', 'llm'] 
+__all__ = ['ocr', 'storage', 'llm', 'redis', 'celery'] 
