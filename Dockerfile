@@ -1,5 +1,5 @@
 # 使用官方 Python 运行时作为父镜像
-FROM python:3.10-slim
+FROM python:3.12.7
 
 # 设置环境变量，确保 Python 输出直接打印到终端，便于 Docker 日志收集
 ENV PYTHONUNBUFFERED=1
