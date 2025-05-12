@@ -555,10 +555,6 @@ class MarkMuse:
         # 输出Markdown文件的路径
         output_file = os.path.join(output_dir, f"{filename}.md")
         
-        # 如果使用S3存储，则不需要上传步骤，直接使用S3 URL
-        # 由于 save_images_from_ocr 已经处理了上传，所以不需要再进行目录上传
-        # 这里只需使用图像映射中的URL
-                
         # 合并所有页面的Markdown内容
         all_content = []
         
@@ -676,17 +672,19 @@ class MarkMuse:
             logger.info(f"转换完成! Markdown文档已保存至 {output_file}")
             
             # 如果启用了S3存储，上传Markdown文件到S3
+            final_output_path = output_file  # 默认为本地文件路径
             if self.use_s3 and self.storage_client:
                 s3_md_url = self.storage_client.upload_file(output_file, f"{filename}/{filename}.md", "text/markdown")
                 if s3_md_url:
                     logger.info(f"Markdown文档已上传到S3/MinIO: {s3_md_url}")
+                    final_output_path = s3_md_url  # 使用S3 URL作为返回值
             
-            return output_file
+            return final_output_path
         except Exception as e:
             logger.error(f"保存Markdown文件时出错: {str(e)}")
             return ""
     
-    def convert_pdf_to_md(self, pdf_path_or_url: str, output_dir: str, output_filename: str = None, is_url: bool = False) -> bool:
+    def convert_pdf_to_md(self, pdf_path_or_url: str, output_dir: str, output_filename: str = None, is_url: bool = False) -> str:
         """
         将PDF文件转换为Markdown文档
         
@@ -697,7 +695,7 @@ class MarkMuse:
         - is_url: 是否是URL
         
         返回:
-        - bool: 转换是否成功
+        - str: 转换成功时返回Markdown文件路径或S3 URL，失败时返回空字符串
         """
         try:
             # 确保输出目录存在
@@ -724,15 +722,15 @@ class MarkMuse:
             # 提取文本
             ocr_result = self.extract_text_from_pdf(pdf_path_or_url, is_url)
             if ocr_result is None:
-                return False
+                return ""
                 
             # 创建Markdown文档并保存图片
-            output_file = self.create_markdown_from_ocr(ocr_result, output_dir, filename)
-            return bool(output_file)
+            output_path = self.create_markdown_from_ocr(ocr_result, output_dir, filename)
+            return output_path
             
         except Exception as e:
             logger.error(f"转换过程中发生错误: {str(e)}")
-            return False
+            return ""
 
     def batch_convert(self, input_folder: str, output_folder: str) -> None:
         """
@@ -763,8 +761,10 @@ class MarkMuse:
                 pdf_path = os.path.join(input_folder, pdf_file)
                 
                 logger.info(f"开始转换 {pdf_file}...")
-                if self.convert_pdf_to_md(pdf_path, output_folder):
+                output_path = self.convert_pdf_to_md(pdf_path, output_folder)
+                if output_path:  # 如果返回了有效路径或URL，则转换成功
                     success_count += 1
+                    logger.info(f"PDF '{pdf_file}' 已成功转换，输出: {output_path}")
                 else:
                     failed_files.append(pdf_file)
                 
@@ -931,9 +931,12 @@ def main():
                 parallel_images=args.parallel_images,
                 prompt_manager=prompt_manager
             )
-            success = converter.convert_pdf_to_md(args.file, output_dir, args.output_name)
-            if not success:
+            output_path = converter.convert_pdf_to_md(args.file, output_dir, args.output_name)
+            if not output_path:
+                logger.error("转换失败")
                 sys.exit(1)
+            else:
+                logger.info(f"转换成功，输出: {output_path}")
         
         # 处理单文件转换（远程URL）
         elif args.url:
@@ -949,9 +952,12 @@ def main():
                 parallel_images=args.parallel_images,
                 prompt_manager=prompt_manager
             )
-            success = converter.convert_pdf_to_md(args.url, output_dir, args.output_name, is_url=True)
-            if not success:
+            output_path = converter.convert_pdf_to_md(args.url, output_dir, args.output_name, is_url=True)
+            if not output_path:
+                logger.error("转换失败")
                 sys.exit(1)
+            else:
+                logger.info(f"转换成功，输出: {output_path}")
     
     except KeyboardInterrupt:
         logger.info("操作被用户中断")
