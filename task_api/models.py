@@ -157,4 +157,30 @@ class TaskListResponse(BaseModel):
                 "page": 1,
                 "page_size": 10
             }
+        }
+
+
+class FileUploadResponse(BaseModel):
+    """
+    文件上传响应模型
+    
+    用于API返回文件上传结果
+    """
+    url: str = Field(..., description="文件的S3 URL")
+    key: str = Field(..., description="文件在S3中的对象键")
+    filename: str = Field(..., description="原始文件名")
+    content_type: str = Field(..., description="文件的内容类型")
+    file_size: int = Field(..., description="文件大小（字节）")
+    uploaded_at: datetime = Field(..., description="上传时间")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "url": "https://bucket.s3.region.amazonaws.com/uploads/8f8e3d3a_example.pdf",
+                "key": "uploads/8f8e3d3a_example.pdf",
+                "filename": "example.pdf",
+                "content_type": "application/pdf",
+                "file_size": 1024567,
+                "uploaded_at": "2023-11-05T12:00:15Z"
+            }
         } 

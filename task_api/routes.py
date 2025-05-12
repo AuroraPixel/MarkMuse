@@ -6,7 +6,10 @@ API路由定义
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query, Path, status
+import uuid
+import os
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, status, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -16,14 +19,16 @@ from clients.db.crud import (
     get_task_log,
     get_task_logs
 )
-from config.api_config import get_db
+from clients.storage import S3Storage
+from config.api_config import get_db, load_api_config
 from .models import (
     TaskSubmitRequest,
     TaskSubmitResponse,
     TaskStatusResponse,
     TaskListResponse,
     TaskProgress,
-    TaskStatus
+    TaskStatus,
+    FileUploadResponse
 )
 
 # 配置日志
@@ -269,4 +274,231 @@ async def get_task_list(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"查询任务列表失败: {str(e)}"
+        )
+
+@router.post(
+    "/upload",
+    response_model=FileUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="上传文件",
+    description="上传文件到S3存储，支持多部分表单数据"
+)
+async def upload_file(
+    file: UploadFile = File(..., description="要上传的文件"),
+    prefix: str = Form(None, description="存储路径前缀（可选）"),
+    db: Session = Depends(get_db)
+) -> FileUploadResponse:
+    """
+    文件上传接口
+    
+    接收多部分表单数据，将文件上传到S3存储，并返回文件的URL和对象键
+    """
+    try:
+        # 加载配置获取S3参数
+        app_config = load_api_config()
+        
+        # 检查S3配置是否完整
+        if not all([app_config.s3_access_key, app_config.s3_secret_key, app_config.s3_bucket]):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="S3存储配置不完整，无法上传文件"
+            )
+        
+        # 准备S3配置
+        s3_config = {
+            'access_key': app_config.s3_access_key,
+            'secret_key': app_config.s3_secret_key,
+            'bucket_name': app_config.s3_bucket,
+            'endpoint_url': app_config.s3_endpoint_url,
+            'path_prefix': app_config.s3_path_prefix
+        }
+        
+        # 初始化S3客户端
+        s3_client = S3Storage(s3_config)
+        
+        # 获取上传文件内容
+        file_content = await file.read()
+        file_size = len(file_content)
+        
+        # 确定上传路径和MIME类型
+        original_filename = file.filename
+        content_type = file.content_type or 'application/octet-stream'
+        
+        # 生成唯一文件名
+        file_ext = os.path.splitext(original_filename)[1]
+        unique_id = uuid.uuid4().hex[:8]
+        safe_filename = f"{unique_id}_{original_filename.replace(' ', '_')}"
+        
+        # 构建对象键路径
+        if prefix:
+            object_key = f"{prefix.strip('/')}/{safe_filename}"
+        else:
+            object_key = f"uploads/{safe_filename}"
+        
+        # 如果有全局路径前缀，添加到对象键
+        if app_config.s3_path_prefix:
+            prefix_clean = app_config.s3_path_prefix.strip('/')
+            if prefix_clean:
+                object_key = f"{prefix_clean}/{object_key}"
+        
+        # 上传文件到S3
+        logger.info(f"上传文件 {original_filename} 到 S3，对象键: {object_key}")
+        url = s3_client.upload_bytes(
+            data=file_content,
+            remote_path=object_key,
+            content_type=content_type
+        )
+        
+        if not url:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="上传文件到S3失败"
+            )
+        
+        # 返回响应
+        return FileUploadResponse(
+            url=url,
+            key=object_key,
+            filename=original_filename,
+            content_type=content_type,
+            file_size=file_size,
+            uploaded_at=datetime.utcnow()
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"文件上传处理失败: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"文件上传处理失败: {str(e)}"
+        )
+
+@router.post(
+    "/pdf-to-markdown",
+    response_model=TaskSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="PDF转Markdown",
+    description="上传PDF文件并异步转换为Markdown"
+)
+async def pdf_to_markdown(
+    pdf_file: UploadFile = File(..., description="要转换的PDF文件"),
+    enhance_image: bool = Form(True, description="是否使用AI增强图片理解"),
+    llm_provider: str = Form("openai", description="LLM提供商，支持'openai'或'qianfan'"),
+    parallel_images: Optional[int] = Form(None, description="并行处理图片的数量"),
+    db: Session = Depends(get_db)
+) -> TaskSubmitResponse:
+    """
+    PDF转Markdown接口
+    
+    接收PDF文件，上传到S3，并创建异步任务进行转换处理
+    """
+    try:
+        # 加载配置获取S3参数
+        app_config = load_api_config()
+        
+        # 检查PDF文件类型
+        if not pdf_file.content_type or 'pdf' not in pdf_file.content_type.lower():
+            logger.warning(f"上传的文件类型可能不是PDF: {pdf_file.content_type}")
+        
+        # 检查S3配置是否完整
+        if not all([app_config.s3_access_key, app_config.s3_secret_key, app_config.s3_bucket]):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="S3存储配置不完整，无法上传文件"
+            )
+        
+        # 准备S3配置
+        s3_config = {
+            'access_key': app_config.s3_access_key,
+            'secret_key': app_config.s3_secret_key,
+            'bucket_name': app_config.s3_bucket,
+            'endpoint_url': app_config.s3_endpoint_url,
+            'path_prefix': app_config.s3_path_prefix
+        }
+        
+        # 初始化S3客户端
+        s3_client = S3Storage(s3_config)
+        
+        # 获取上传文件内容
+        pdf_content = await pdf_file.read()
+        
+        # 确定上传路径和MIME类型
+        original_filename = pdf_file.filename
+        content_type = pdf_file.content_type or 'application/pdf'
+        
+        # 生成唯一文件名
+        file_ext = os.path.splitext(original_filename)[1]
+        unique_id = uuid.uuid4().hex[:8]
+        safe_filename = f"{unique_id}_{original_filename.replace(' ', '_')}"
+        
+        # 构建对象键路径
+        object_key = f"incoming_pdfs/{safe_filename}"
+        
+        # 如果有全局路径前缀，添加到对象键
+        if app_config.s3_path_prefix:
+            prefix_clean = app_config.s3_path_prefix.strip('/')
+            if prefix_clean:
+                object_key = f"{prefix_clean}/{object_key}"
+        
+        # 上传文件到S3
+        logger.info(f"上传PDF文件 {original_filename} 到 S3，对象键: {object_key}")
+        pdf_s3_url = s3_client.upload_bytes(
+            data=pdf_content,
+            remote_path=object_key,
+            content_type=content_type
+        )
+        
+        if not pdf_s3_url:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="上传PDF文件到S3失败"
+            )
+        
+        # 准备任务参数
+        task_parameters = {
+            "pdf_s3_url": pdf_s3_url,
+            "object_key": object_key,
+            "original_filename": original_filename,
+            "task_options": {
+                "enhance_image": enhance_image,
+                "llm_provider": llm_provider
+            }
+        }
+        
+        # 如果指定了并行处理图片数量，添加到选项中
+        if parallel_images is not None:
+            task_parameters["task_options"]["parallel_images"] = parallel_images
+        
+        # 发送任务到Celery
+        async_result = celery_app.send_task(
+            name="clients.celery.pdf_processing.transcribe_pdf_url_to_md",
+            kwargs=task_parameters
+        )
+        
+        # 记录任务到数据库
+        try:
+            create_task_log(
+                db=db,
+                celery_task_id=async_result.id,
+                task_type="clients.celery.pdf_processing.transcribe_pdf_url_to_md",
+                task_parameters=task_parameters,
+                submitted_at=datetime.utcnow()
+            )
+        except Exception as db_err:
+            logger.error(f"记录任务到数据库失败: {db_err}")
+            # 即使数据库记录失败，也继续返回任务ID
+        
+        # 返回响应
+        return TaskSubmitResponse(
+            task_id=async_result.id,
+            status=TaskStatus.PENDING,
+            message=f"PDF文件 {original_filename} 已上传并提交转换任务"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PDF转Markdown处理失败: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"PDF转Markdown处理失败: {str(e)}"
         ) 

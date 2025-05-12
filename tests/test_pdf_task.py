@@ -3,14 +3,13 @@
 
 """
 PDF转Markdown任务测试脚本
-测试clients.celery.pdf_processing_tasks.transcribe_pdf_to_md_task的功能
+测试使用多部分表单上传PDF并通过Celery任务转换为Markdown
 """
 
 import os
 import sys
 import time
 import json
-import base64
 import logging
 import requests
 from typing import Dict, Any, Optional
@@ -35,7 +34,7 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 def submit_pdf_task(pdf_file_path: str, task_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    提交PDF转Markdown任务
+    提交PDF转Markdown任务，使用多部分表单上传
     
     参数:
     - pdf_file_path: PDF文件路径
@@ -44,45 +43,46 @@ def submit_pdf_task(pdf_file_path: str, task_options: Optional[Dict[str, Any]] =
     返回:
     - Dict[str, Any]: API响应
     """
-    url = f"{API_BASE_URL}/tasks/submit"
-    
-    # 读取PDF文件并编码为base64
-    try:
-        with open(pdf_file_path, 'rb') as f:
-            pdf_content = f.read()
-        pdf_content_base64 = base64.b64encode(pdf_content).decode('utf-8')
-    except Exception as e:
-        logger.error(f"读取PDF文件失败: {str(e)}")
-        raise
+    url = f"{API_BASE_URL}/tasks/pdf-to-markdown"
     
     # 获取原始文件名
     original_filename = os.path.basename(pdf_file_path)
     
-    # 默认任务选项
-    if task_options is None:
-        task_options = {
-            "enhance_image": True,
-            "llm_provider": "openai"
-        }
+    # 准备表单数据
+    form_data = {}
     
-    # 构建请求载荷
-    payload = {
-        "task_type": "clients.celery.pdf_processing.transcribe_pdf_to_md",
-        "task_parameters": {
-            "pdf_file_content_base64": pdf_content_base64,
-            "original_filename": original_filename,
-            "task_options": task_options
-        }
+    # 添加任务选项
+    if task_options is None:
+        task_options = {}
+    
+    # 设置增强图片选项
+    enhance_image = task_options.get("enhance_image", True)
+    form_data["enhance_image"] = "true" if enhance_image else "false"
+    
+    # 设置LLM提供商
+    llm_provider = task_options.get("llm_provider", "openai")
+    form_data["llm_provider"] = llm_provider
+    
+    # 设置并行处理图片数量（如果有）
+    if "parallel_images" in task_options:
+        form_data["parallel_images"] = str(task_options["parallel_images"])
+    
+    # 准备文件数据
+    files = {
+        "pdf_file": (original_filename, open(pdf_file_path, "rb"), "application/pdf")
     }
     
     try:
         logger.info(f"正在提交PDF转Markdown任务，文件: {original_filename}")
-        response = requests.post(url, json=payload)
+        response = requests.post(url, data=form_data, files=files)
         response.raise_for_status()
         return response.json()
     except Exception as e:
         logger.error(f"提交任务失败: {str(e)}")
         raise
+    finally:
+        # 确保文件对象被关闭
+        files["pdf_file"][1].close()
 
 def get_task_status(task_id: str) -> Dict[str, Any]:
     """
@@ -127,8 +127,13 @@ def wait_for_task_completion(task_id: str, max_wait: int = 600, interval: int = 
         
         # 显示当前状态
         if status == "PROGRESS" and "progress" in status_response:
-            progress = status_response["progress"]
-            logger.info(f"任务进度: {progress['progress']}% - {progress['status']}")
+            progress_meta = status_response["progress"] # 这是Celery任务的meta数据
+            if progress_meta and isinstance(progress_meta, dict) and 'progress' in progress_meta and 'status' in progress_meta:
+                logger.info(f"任务进度: {progress_meta['progress']}% - {progress_meta['status']}")
+            elif progress_meta: # 如果 progress_meta 存在但不是预期的字典结构
+                logger.info(f"任务状态: {status}, 进度详情不完整: {progress_meta}")
+            else: # 如果 progress_meta 为 None
+                logger.info(f"任务状态: {status}, 正在处理中...")
         else:
             logger.info(f"任务状态: {status}")
         
