@@ -183,7 +183,10 @@ class OpenAILLMClient(LLMClient):
             
             full_response = ""
             logger.info(f"开始分析图片: {img_id}")
-            print(f"\n开始分析图片 {img_id} ...", end="", flush=True)
+            
+            # 根据日志级别决定是否输出打字效果
+            if self.should_print_typing_output():
+                print(f"\n开始分析图片 {img_id} ...", end="", flush=True)
             
             for chunk in self.model.stream([
                 HumanMessage(content=[
@@ -196,9 +199,15 @@ class OpenAILLMClient(LLMClient):
                 if hasattr(chunk, 'content'):
                     content = chunk.content
                     full_response += content
-                    print(content, end="", flush=True)
+                    
+                    # 根据日志级别决定是否输出打字效果
+                    if self.should_print_typing_output():
+                        print(content, end="", flush=True)
             
-            print("\n图片分析完成\n", flush=True)
+            # 根据日志级别决定是否输出完成信息
+            if self.should_print_typing_output():
+                print("\n图片分析完成\n", flush=True)
+                
             logger.info(f"图片 {img_id} 分析完成")
             return full_response
         except Exception as e:
@@ -220,7 +229,10 @@ class OpenAILLMClient(LLMClient):
             prompt = analysis_prompt or self.get_default_prompt()
             
             logger.info(f"开始分析远程图片: {image_url}")
-            print(f"\n开始分析图片 (URL模式) ...", end="", flush=True)
+            
+            # 根据日志级别决定是否输出打字效果
+            if self.should_print_typing_output():
+                print(f"\n开始分析图片 (URL模式) ...", end="", flush=True)
             
             # 流式处理
             full_response = ""
@@ -233,9 +245,15 @@ class OpenAILLMClient(LLMClient):
                 if hasattr(chunk, 'content'):
                     content = chunk.content
                     full_response += content
-                    print(content, end="", flush=True)
+                    
+                    # 根据日志级别决定是否输出打字效果
+                    if self.should_print_typing_output():
+                        print(content, end="", flush=True)
             
-            print("\n图片分析完成\n", flush=True)
+            # 根据日志级别决定是否输出完成信息
+            if self.should_print_typing_output():
+                print("\n图片分析完成\n", flush=True)
+            
             logger.info(f"远程图片 URL 分析完成")
             return full_response
             

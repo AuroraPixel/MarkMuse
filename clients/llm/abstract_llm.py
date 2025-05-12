@@ -34,6 +34,18 @@ class LLMClient(ABC):
         """
         return capability in self.runtime_capabilities
     
+    @staticmethod
+    def should_print_typing_output() -> bool:
+        """
+        检查是否应该输出打字效果（流式输出）
+        根据环境变量LOG_LEVEL判断，只有在DEBUG模式才输出
+        
+        返回:
+            bool: 是否应该输出打字效果
+        """
+        import os
+        return os.environ.get('LOG_LEVEL', 'INFO').upper() == 'DEBUG'
+    
     @abstractmethod
     def chat(self, messages: List[Dict[str, Any]], **kwargs) -> str:
         """
