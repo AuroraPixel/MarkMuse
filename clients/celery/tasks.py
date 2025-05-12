@@ -14,6 +14,7 @@ from celery.utils.log import get_task_logger
 from celery.exceptions import Ignore, Retry
 
 from .app import celery_app
+from .base_tasks import DatabaseAwareTask
 
 # 设置任务专用日志记录器
 logger = get_task_logger(__name__)
@@ -200,26 +201,19 @@ class AsyncTask(BaseTask):
             
             # 完成
             self.update_progress(100, "任务完成")
-            execution_time = time.time() - start_time
-            logger.info(f"任务完成: {self.name}[{self.request.id}] - 耗时: {execution_time:.2f}秒")
             
-            # 保存结果
-            self.result_data = final_result
+            # 记录执行时间
+            elapsed = time.time() - start_time
+            logger.info(f"任务耗时: {elapsed:.2f}秒")
+            
             return final_result
             
         except Exception as e:
-            execution_time = time.time() - start_time
-            logger.error(f"任务异常: {self.name}[{self.request.id}] - {str(e)} - 耗时: {execution_time:.2f}秒")
-            self.update_progress(self.progress, f"任务异常: {str(e)}")
-            
-            # # 重试逻辑 (移除, 交给 BaseTask 的 autoretry_for 处理)
-            # if self.max_retries > 0 and self.request.retries < self.max_retries:
-            #     logger.warning(f"任务将重试: {self.name}[{self.request.id}] - 尝试: {self.request.retries + 1}/{self.max_retries}")
-            #     raise self.retry(exc=e, countdown=int(2 ** self.request.retries * 60))
-                
-            # # 达到最大重试次数或不重试 (移除, 交给 BaseTask 的 autoretry_for 处理)
-            # raise TaskError(f"任务执行失败: {str(e)}")
-            raise e # 重新抛出原始异常，让Celery的autoretry机制处理
+            # 记录异常
+            self.update_progress(0, f"任务失败: {str(e)}")
+            logger.error(f"任务执行出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
 
 
 class PeriodicTask(AsyncTask):
@@ -235,37 +229,44 @@ class PeriodicTask(AsyncTask):
     @classmethod
     def register_schedule(cls, app=None):
         """
-        注册定期任务到Celery beat调度器
+        注册定期任务调度
         
         参数:
-        - app: Celery应用实例，如果为None则使用默认应用
+        - app: Celery应用实例
+        
+        返回:
+        - dict: Celery beat调度配置
         """
-        app = app or celery_app
-        
-        if not cls.run_every:
-            logger.warning(f"定期任务 {cls.__name__} 未设置执行间隔 (run_every)，不会自动调度")
-            return
-        
-        # 获取任务名称
-        task_path = f"{cls.__module__}.{cls.__name__}"
-        
-        # 注册到beat调度
-        beat_schedule = getattr(app.conf, 'beat_schedule', {})
-        beat_schedule[cls.__name__] = {
-            'task': task_path,
+        if app is None:
+            app = celery_app
+            
+        if cls.run_every is None:
+            logger.warning(f"任务{cls.__name__}未指定run_every，无法注册调度")
+            return {}
+            
+        # 注册定期任务调度
+        schedule_name = f'{cls.__name__}_schedule'
+        schedule_entry = {
+            'task': cls.name,
             'schedule': cls.run_every,
+            'args': (),
+            'kwargs': {},
             'options': {
-                'queue': getattr(cls, 'queue', 'periodic'),
+                'expires': 3600  # 默认过期时间1小时
             }
         }
-        app.conf.beat_schedule = beat_schedule
         
-        logger.info(f"定期任务已注册: {cls.__name__} - 间隔: {cls.run_every}")
+        # 更新Celery beat调度
+        app.conf.beat_schedule = getattr(app.conf, 'beat_schedule', {})
+        app.conf.beat_schedule[schedule_name] = schedule_entry
+        
+        logger.info(f"已注册定期任务: {cls.name}, 间隔: {cls.run_every}")
+        return {schedule_name: schedule_entry}
 
 
 def register_task(base=None, name=None, **options):
     """
-    注册任务的装饰器
+    任务注册装饰器
     
     参数:
     - base: 任务基类，默认为BaseTask
@@ -273,58 +274,103 @@ def register_task(base=None, name=None, **options):
     - options: 其他任务选项
     
     返回:
-    - Callable: 装饰器函数
+    - function: 装饰器函数
     """
     def decorator(func):
         # 使用自定义基类和选项注册任务
-        task_options = options.copy()
-        task_options['base'] = base or BaseTask
-        if name:
-            task_options['name'] = name
+        base_cls = base or BaseTask
+        task_name = name or f"{func.__module__}.{func.__name__}"
         
-        # 应用shared_task装饰器
-        return shared_task(**task_options)(func)
+        # 应用装饰器
+        return celery_app.task(
+            base=base_cls,
+            name=task_name,
+            bind=True,
+            **options
+        )(func)
     
     return decorator
 
 
-# 基础示例任务（不执行任何业务逻辑，仅用于测试组件）
-
 @shared_task(base=AsyncTask, bind=True)
 def example_task(self, task_name: str, delay: int = 5) -> Dict[str, Any]:
     """
-    示例任务，用于测试Celery功能
+    示例任务：模拟长时间运行的处理过程
     
     参数:
     - task_name: 任务名称
     - delay: 模拟处理延迟（秒）
     
     返回:
-    - Dict[str, Any]: 包含任务信息的字典
+    - Dict[str, Any]: 任务结果
     """
-    self.update_progress(0, f"开始执行示例任务: {task_name}")
+    logger.info(f"开始执行示例任务: {task_name}, 延迟: {delay}秒")
     
-    # 模拟处理过程
-    total_steps = 5
-    for i in range(1, total_steps + 1):
-        # 模拟处理
-        time.sleep(delay / total_steps)
-        
+    # 更新初始进度
+    self.update_progress(0, "任务开始")
+    
+    # 模拟多步骤处理过程
+    steps = 5
+    for i in range(1, steps + 1):
+        # 计算当前进度
+        progress = i * (100 // steps)
         # 更新进度
-        progress = int(i / total_steps * 100)
-        self.update_progress(progress, f"处理中: 步骤 {i}/{total_steps}")
+        self.update_progress(progress, f"处理步骤 {i}/{steps}")
+        # 模拟处理时间
+        time.sleep(delay / steps)
     
     # 完成任务
-    result = {
+    self.update_progress(100, "任务完成")
+    
+    # 返回结果
+    return {
         "task_name": task_name,
-        "task_id": self.request.id,
         "status": "成功",
-        "timestamp": time.time(),
         "details": {
-            "steps_completed": total_steps,
+            "steps_completed": steps,
             "total_delay": delay
         }
     }
+
+
+@shared_task(base=DatabaseAwareTask, bind=True)
+def db_aware_task(self, task_name: str, delay: int = 5, fail: bool = False) -> Dict[str, Any]:
+    """
+    数据库感知的示例任务，将状态同步到数据库
     
+    参数:
+    - task_name: 任务名称
+    - delay: 模拟处理延迟（秒）
+    - fail: 是否模拟失败
+    
+    返回:
+    - Dict[str, Any]: 任务结果
+    """
+    logger.info(f"开始执行数据库感知任务: {task_name}, 延迟: {delay}秒, 失败模式: {fail}")
+    
+    # 模拟多步骤处理过程
+    steps = 5
+    for i in range(1, steps + 1):
+        # 计算当前进度
+        progress = i * (100 // steps)
+        # 更新进度（会自动同步到数据库）
+        self.update_progress(progress, f"处理步骤 {i}/{steps}")
+        # 模拟处理时间
+        time.sleep(delay / steps)
+        
+        # 如果配置为失败模式，在中间步骤失败
+        if fail and i == 3:
+            raise TaskError(f"任务 {task_name} 在步骤 {i} 模拟失败")
+    
+    # 完成任务
     self.update_progress(100, "任务完成")
-    return result 
+    
+    # 返回结果
+    return {
+        "task_name": task_name,
+        "status": "成功",
+        "details": {
+            "steps_completed": steps,
+            "total_delay": delay
+        }
+    } 

@@ -108,7 +108,7 @@ def configure_celery(app: Celery, config: Optional[APIConfig] = None, **kwargs) 
         app.conf.task_default_queue = 'default'
         
         # 注册任务
-        app.autodiscover_tasks(['clients.celery.tasks'])
+        app.autodiscover_tasks(['clients.celery.tasks', 'clients.celery.example_tasks'])
         
         # 记录配置完成
         broker_display = broker_url.split('@')[-1] if '@' in broker_url else broker_url
